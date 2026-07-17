@@ -1,0 +1,76 @@
+Name:               optimized-baseline-epp
+Namespace:          default
+CreationTimestamp:  Fri, 17 Jul 2026 01:34:52 +0300
+Labels:             app.kubernetes.io/managed-by=Helm
+                    app.kubernetes.io/name=optimized-baseline-epp
+                    app.kubernetes.io/version=v1.5.0
+                    inference.networking.k8s.io/igw-mode=inferencepool
+Annotations:        deployment.kubernetes.io/revision: 4
+                    meta.helm.sh/release-name: optimized-baseline
+                    meta.helm.sh/release-namespace: default
+Selector:           inferencepool=optimized-baseline-epp
+Replicas:           1 desired | 1 updated | 1 total | 1 available | 0 unavailable
+StrategyType:       Recreate
+MinReadySeconds:    0
+Pod Template:
+  Labels:           inference.networking.k8s.io/igw-mode=inferencepool
+                    inferencepool=optimized-baseline-epp
+  Service Account:  optimized-baseline-epp
+  Containers:
+   epp:
+    Image:       ghcr.io/llm-d/llm-d-inference-scheduler:v0.8.0
+    Ports:       9002/TCP, 9003/TCP, 9090/TCP
+    Host Ports:  0/TCP, 0/TCP, 0/TCP
+    Args:
+      --pool-name
+      optimized-baseline
+      --pool-namespace
+      default
+      --pool-group
+      inference.networking.k8s.io
+      --zap-encoder
+      json
+      --config-file
+      /config/optimized-baseline-plugins.yaml
+      --v
+      4
+      --tracing=true
+    Limits:
+      memory:  512Mi
+    Requests:
+      cpu:      250m
+      memory:   256Mi
+    Liveness:   grpc <pod>:9003 inference-extension delay=5s timeout=1s period=10s #success=1 #failure=3
+    Readiness:  grpc <pod>:9003 inference-extension delay=0s timeout=1s period=2s #success=1 #failure=3
+    Environment:
+      NAMESPACE:                            (v1:metadata.namespace)
+      POD_NAME:                             (v1:metadata.name)
+      OTEL_SERVICE_NAME:                   gateway-api-inference-extension/epp
+      OTEL_EXPORTER_OTLP_ENDPOINT:         http://otel-collector:4317
+      OTEL_TRACES_EXPORTER:                otlp
+      OTEL_RESOURCE_ATTRIBUTES_NODE_NAME:   (v1:spec.nodeName)
+      OTEL_RESOURCE_ATTRIBUTES_POD_NAME:    (v1:metadata.name)
+      OTEL_RESOURCE_ATTRIBUTES:            k8s.namespace.name=$(NAMESPACE),k8s.node.name=$(OTEL_RESOURCE_ATTRIBUTES_NODE_NAME),k8s.pod.name=$(OTEL_RESOURCE_ATTRIBUTES_POD_NAME)
+      OTEL_TRACES_SAMPLER:                 parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG:             1.0
+    Mounts:
+      /config from plugins-config-volume (rw)
+  Volumes:
+   plugins-config-volume:
+    Type:          ConfigMap (a volume populated by a ConfigMap)
+    Name:          optimized-baseline-epp
+    Optional:      false
+  Node-Selectors:  <none>
+  Tolerations:     <none>
+Conditions:
+  Type           Status  Reason
+  ----           ------  ------
+  Available      True    MinimumReplicasAvailable
+  Progressing    True    NewReplicaSetAvailable
+OldReplicaSets:  optimized-baseline-epp-bf4dcd46c (0/0 replicas created), optimized-baseline-epp-66858d67bb (0/0 replicas created)
+NewReplicaSet:   optimized-baseline-epp-c59b56b76 (1/1 replicas created)
+Events:
+  Type    Reason             Age    From                   Message
+  ----    ------             ----   ----                   -------
+  Normal  ScalingReplicaSet  7m41s  deployment-controller  Scaled down replica set optimized-baseline-epp-66858d67bb from 1 to 0
+  Normal  ScalingReplicaSet  7m40s  deployment-controller  Scaled up replica set optimized-baseline-epp-c59b56b76 from 0 to 1
