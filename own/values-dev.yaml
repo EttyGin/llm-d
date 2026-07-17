@@ -1,0 +1,61 @@
+# values-dev.yaml — ModelService, dev, chart-native, ArgoCD-ready
+# מודל נמשך מ-HuggingFace, tracing דלוק, מחובר ל-InferencePool הקיים
+
+tracing:
+  enabled: true
+  otlpEndpoint: "http://otel-collector:4317"
+  sampling:
+    sampler: "parentbased_traceidratio"
+    samplerArg: "1.0"
+  vllm:
+    collectDetailedTraces: "all"
+
+modelArtifacts:
+  name: Qwen/Qwen2.5-0.5B-Instruct       # שם המודל ב-OpenAI requests
+  uri: "hf://Qwen/Qwen2.5-0.5B-Instruct" # נמשך מ-HuggingFace
+  authSecretName: llm-d-hf-token         # ה-secret שיצרת
+  size: 2Gi                              # מוגדל מ-5Mi — משקל המודל בפועל
+  labels:
+    llm-d.ai/inference-serving: "true"
+    llm-d.ai/guide: optimized-baseline   # קריטי: מתאים ל-matchLabels של ה-InferencePool
+
+accelerator:
+  type: cpu
+
+routing:
+  servicePort: 8000                      # מתאים ל-targetPorts של ה-InferencePool
+  proxy:
+    enabled: false                       # אין P/D disaggregation → אין sidecar
+
+decode:
+  create: true                           # יוצר את ה-pod
+  replicas: 1
+  enableServiceLinks: false              # מונע מקוברנטיס להזריק VLLM_PORT משירות בשם vllm
+  autoscaling:
+    enabled: false                       # autoscaling בשלב הבא
+  containers:
+    - name: vllm
+      image: "vllm/vllm-openai-cpu:v0.22.1-x86_64"
+      modelCommand: vllmServe
+      args:
+        - "--served-model-name"
+        - "qwen-0.5b"
+        - "--max-model-len"
+        - "32768"
+        - "--enforce-eager"
+      env:
+        - name: HF_HUB_DISABLE_XET
+          value: "1"
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: "1"
+      mountModelVolume: true
+      resources:
+        requests:
+          cpu: "1"
+          memory: 3Gi
+        limits:
+          cpu: "4"
+          memory: 4Gi
+
+prefill:
+  create: false                          # אין prefill נפרד
