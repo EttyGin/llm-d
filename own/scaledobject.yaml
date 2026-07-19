@@ -1,0 +1,56 @@
+# KEDA ScaledObject — autoscales the vLLM decode deployment on EPP metrics
+# scraped by the in-cluster Prometheus (job "epp-metrics").
+#
+# Flow: EPP /metrics --scrape--> Prometheus --query--> KEDA prometheus scaler
+#       --> external.metrics.k8s.io --> HPA (created by KEDA) --> Deployment.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: qwen-decode-epp
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: qwen-modelservice-llm-d-modelservice-decode
+  minReplicaCount: 1
+  maxReplicaCount: 2          # HARD cap: ~10GB RAM, each vLLM pod ~4GB. Never raise.
+  # NOTE: pollingInterval/cooldownPeriod only apply when scaling to/from zero
+  # (minReplicaCount: 0). With minReplicaCount: 1 the underlying HPA governs the
+  # cadence (~15s sync loop), so they are intentionally omitted here.
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0     # react to load immediately
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 30     # short, so we can watch it scale back
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 15
+  triggers:
+    # PRIMARY — running / in-flight requests. This is the signal that actually
+    # moves on this setup: a single vLLM CPU pod admits all concurrent requests
+    # into its running batch, so queue-depth stays 0 under demo load.
+    # metricType AverageValue => desiredReplicas = ceil(query / threshold).
+    # value 12 (12 concurrent) / 3 => 4 -> capped at 2. Idle 0 => stays at 1.
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.default.svc.cluster.local:9090
+        metricName: epp_pool_running_requests
+        query: inference_pool_average_running_requests{name="optimized-baseline"}
+        threshold: "3"
+    # SECONDARY — true backpressure. Fires only when requests actually WAIT for
+    # a backend (queue builds). Stays 0 under light demo load; included so heavier
+    # real load still triggers. HPA takes the max desired across triggers.
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.default.svc.cluster.local:9090
+        metricName: epp_pool_queue_size
+        query: inference_pool_average_queue_size{name="optimized-baseline"}
+        threshold: "1"

@@ -1,0 +1,43 @@
+# Grants GET on the /metrics nonResourceURL so Prometheus (running as the
+# `default` ServiceAccount in namespace default) can scrape the EPP's
+# authorization-protected metrics endpoint (v0.8.0 serves /metrics behind
+# SubjectAccessReview). Read-only, additive — safe for the existing setup.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: epp-metrics-reader
+rules:
+  - nonResourceURLs:
+      - /metrics
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: epp-metrics-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: epp-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: default
+---
+# The EPP validates incoming metrics tokens via TokenReview/SubjectAccessReview,
+# so its own ServiceAccount needs the delegated-auth role. The inferencepool
+# chart did not bind this, which is why /metrics returned 500 "Authentication
+# failed" even with a valid token.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: optimized-baseline-epp-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: optimized-baseline-epp
+    namespace: default

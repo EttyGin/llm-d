@@ -1,0 +1,81 @@
+experimentalHttpRoute:
+  enabled: true
+  inferenceGatewayName: llm-d-inference-gateway
+inferenceExtension:
+  extraServicePorts:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 8081
+  failureMode: FailOpen
+  flags:
+    v: 2
+  image:
+    hub: ghcr.io/llm-d
+    name: llm-d-inference-scheduler
+    registry: ghcr.io
+    repository: llm-d/llm-d-inference-scheduler
+    tag: v0.8.0
+  pluginsConfigFile: optimized-baseline-plugins.yaml
+  pluginsCustomConfig:
+    optimized-baseline-plugins.yaml: |
+      apiVersion: inference.networking.x-k8s.io/v1alpha1
+      kind: EndpointPickerConfig
+      featureGates:
+        - "flowControl"
+      plugins:
+      - type: queue-scorer
+      - type: kv-cache-utilization-scorer
+      - type: prefix-cache-scorer
+      - type: no-hit-lru-scorer
+      schedulingProfiles:
+      - name: default
+        plugins:
+        - pluginRef: queue-scorer
+          weight: 2
+        - pluginRef: kv-cache-utilization-scorer
+          weight: 4
+        - pluginRef: prefix-cache-scorer
+          weight: 3
+        - pluginRef: no-hit-lru-scorer
+          weight: 2
+  replicas: 1
+  resources:
+    limits:
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+  sidecar:
+    args:
+    - --service-node
+    - envoy-sidecar
+    - --log-level
+    - warn
+    - --concurrency
+    - "2"
+    - --drain-strategy
+    - immediate
+    - --drain-time-s
+    - "60"
+    - -c
+    - /etc/envoy/envoy.yaml
+    resources:
+      limits:
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+  tracing:
+    enabled: true
+    otelExporterEndpoint: http://otel-collector:4317
+    sampling:
+      sampler: parentbased_traceidratio
+      samplerArg: "1.0"
+inferencePool:
+  modelServerProtocol: http
+  modelServers:
+    matchLabels:
+      llm-d.ai/guide: optimized-baseline
+provider:
+  name: istio

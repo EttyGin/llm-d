@@ -1,0 +1,23 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+scrape_configs:
+  - job_name: otel-spanmetrics
+    static_configs:
+      - targets:
+          - otel-collector:8889
+  - job_name: jaeger
+    static_configs:
+      - targets:
+          - jaeger-collector:8888
+  # EPP (inference-scheduler v0.8.0) metrics. /metrics is auth-protected:
+  # Prometheus presents its ServiceAccount (default) bearer token, which is
+  # granted GET on /metrics via own/metrics-rbac.yaml. Plain HTTP on :9090.
+  - job_name: epp-metrics
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    static_configs:
+      - targets:
+          - optimized-baseline-epp:9090
