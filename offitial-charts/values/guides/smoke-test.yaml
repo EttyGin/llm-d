@@ -1,0 +1,37 @@
+## Router-side counterpart to values/modelserver/smoke-test.yaml.
+##
+## NOT an upstream configuration. maxConcurrency and the band limits are
+## scaled-down guesses, not calibrated values — see guides/flow-control/tuning.md
+## and guides/recipes/router/calibration/ for the real procedure.
+##
+## Layer LAST so it wins.
+
+eppPlugins:
+  model:
+    name: Qwen/Qwen3-0.6B
+  flowControl:
+    saturationDetector:
+      type: concurrency-detector
+      parameters:
+        maxConcurrency: 16
+        concurrencyMode: requests
+        headroom: 0.0
+    priorityBands:
+      - priority: 100
+        maxRequests: "64"
+      - priority: 0
+        maxRequests: "32"
+      - priority: -10
+        maxRequests: "8"
+
+llmd:
+  router:
+    epp:
+      # Single replica — the leader-election workaround is a no-op here.
+      replicas: 1
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+        limits:
+          memory: 4Gi

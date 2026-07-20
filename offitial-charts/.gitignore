@@ -1,0 +1,8 @@
+# The repo root .gitignore has `**/charts/`, intended for Helm charts that
+# kustomize pulls down as build artifacts. Here `charts/` is source, so
+# re-include it.
+#
+# A parent directory has to be un-excluded before anything inside it can be
+# re-included, hence both lines.
+!charts/
+!charts/**

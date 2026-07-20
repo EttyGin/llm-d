@@ -1,0 +1,236 @@
+# llm-d model servers — chart defaults.
+#
+# Neutral defaults. Real configuration comes from the layered values tree,
+# mirroring the upstream kustomize overlay structure:
+#
+#   helm install ppc charts/llm-d-modelserver \
+#     -f values/modelserver/base.values.yaml \
+#     -f values/modelserver/gpu-vllm.yaml \
+#     -n $NAMESPACE
+
+model:
+  name: Qwen/Qwen3-32B
+  # Short form for the llm-d.ai/model label (no "/" allowed).
+  label: Qwen3-32B
+
+# InferencePool selector — must match router.modelServers.matchLabels.
+guideLabel: precise-prefix-cache-routing
+
+# Informational labels mirroring the upstream overlay; the InferencePool
+# selects on llm-d.ai/guide only.
+accelerator:
+  variant: gpu
+  vendor: nvidia
+
+hfTokenSecret:
+  name: llm-d-hf-token
+  key: HF_TOKEN
+
+# ---------------------------------------------------------------------------
+# ServiceAccount
+#
+# To bind an EXISTING ServiceAccount instead of creating one:
+#   serviceAccount:
+#     create: false
+#     name: my-existing-sa
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  # Empty => <release>-sa. Set to reuse an existing SA (with create: false),
+  # or to give the created one a specific name.
+  name: ""
+  annotations: {}
+  # Upstream sa.yaml sets this false — model servers need no API access.
+  # Set true if a sidecar or webhook in your cluster requires a token.
+  automountServiceAccountToken: false
+
+decode:
+  enabled: true
+  replicas: 1
+  image:
+    repository: vllm/vllm-openai
+    tag: v0.23.0
+    pullPolicy: IfNotPresent
+  port: 8000
+  kvEvents:
+    enabled: true
+    port: 5556
+    # Must match router epp.llmd.precisePrefixCache.blockSize.
+    blockSize: 64
+  tensorParallelSize: 1
+  # Extra flags appended verbatim to `vllm serve`, after the generated ones.
+  # vLLM takes the last occurrence of a repeated flag, so these also override.
+  #   extraArgs:
+  #     - "--max-model-len=32768"
+  #     - "--gpu-memory-utilization=0.92"
+  #     - "--enable-prefix-caching"
+  extraArgs: []
+
+  # Annotations on the pod template (e.g. Istio sidecar injection control,
+  # scheduler hints, Prometheus scrape config).
+  #   annotations:
+  #     sidecar.istio.io/inject: "false"
+  annotations: {}
+  # Annotations on the Deployment object itself.
+  deploymentAnnotations: {}
+  # Extra labels on the pod template (merged with the selector labels).
+  podLabels: {}
+
+  # Pod-level security context. To run as ROOT:
+  #   podSecurityContext:
+  #     runAsUser: 0
+  #     runAsGroup: 0
+  #     fsGroup: 0
+  #     runAsNonRoot: false
+  podSecurityContext: {}
+
+  # Container-level security context. Takes precedence over the pod-level one.
+  #   securityContext:
+  #     runAsUser: 0
+  #     runAsNonRoot: false
+  #     privileged: false
+  #     capabilities:
+  #       add: ["IPC_LOCK"]
+  securityContext: {}
+
+  imagePullSecrets: []
+
+  tracing:
+    enabled: false
+    otlpEndpoint: "http://otel-collector:4317"
+    detailedTraces: "all"
+  resources:
+    requests:
+      cpu: "8"
+      memory: 96Gi
+      nvidia.com/gpu: 1
+    limits:
+      cpu: "16"
+      memory: 128Gi
+      nvidia.com/gpu: 1
+  shmSize: 20Gi
+  extraEnv: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  startupProbe:
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 120
+  livenessProbe:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+# Standalone `vllm launch render` tokenizer Service. Disabled by
+# values/features/tokenizer-sidecar.yaml in favour of an EPP sidecar.
+render:
+  enabled: true
+  replicas: 1
+  image:
+    repository: docker.io/vllm/vllm-openai-cpu
+    tag: v0.23.0
+    pullPolicy: IfNotPresent
+  port: 8000
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+  annotations: {}
+  podLabels: {}
+  serviceAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  imagePullSecrets: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+monitoring:
+  podMonitor:
+    enabled: false
+    interval: 30s
+    path: /metrics
+
+# ---------------------------------------------------------------------------
+# Autoscaling (KEDA + EPP metrics)
+#
+# Port of guides/workload-autoscaling/keda-epp/scaledobject.yaml.
+# Requires KEDA and a Prometheus scraping the EPP — see
+# values/features/autoscaling-keda.yaml.
+#
+# The two EPP signals (docs/architecture/advanced/autoscaling/hpa-epp.md):
+#   llm_d_epp_flow_control_queue_size  requests waiting for backend capacity.
+#                                      ONLY emitted when the flowControl feature
+#                                      gate is on in the router.
+#   llm_d_epp_request_running          active running requests across the pool.
+# ---------------------------------------------------------------------------
+autoscaling:
+  keda:
+    enabled: false
+
+    minReplicas: 1
+    maxReplicas: 8
+    pollingInterval: 15
+    # Applies to scale-to-zero only; `behavior` governs normal scale-down.
+    cooldownPeriod: 300
+
+    # REQUIRED when enabled. The EPP Service is named "<router release>-epp"
+    # by the upstream chart (e.g. release `ppc` -> Service `ppc-epp`); this
+    # chart cannot infer the router's release name, so state it here.
+    eppServiceName: ""
+
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+      scaleDown:
+        stabilizationWindowSeconds: 300
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+
+    prometheus:
+      serverAddress: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+      auth:
+        # Required for a TLS/bearer-protected Prometheus (e.g. the bundled
+        # kube-prometheus-stack). Plain in-cluster HTTP needs nothing.
+        enabled: false
+        name: keda-prometheus-auth
+        # Create the TriggerAuthentication, or reference an existing one.
+        create: true
+        secretTargetRef:
+          - parameter: ca
+            name: keda-prometheus-auth
+            key: ca.crt
+
+    # `query` is rendered with `tpl`, so it can reference .eppService,
+    # .Release.Namespace and .Values.
+    triggers:
+      - name: epp-running-requests
+        enabled: true
+        metricType: AverageValue
+        query: >-
+          sum(llm_d_epp_request_running{namespace="{{ .Release.Namespace }}",service="{{ .eppService }}",model_name="{{ .Values.model.name }}"})
+        # Target running requests per replica.
+        threshold: "16"
+
+      - name: epp-queue-size
+        # Requires the router's flowControl feature gate.
+        enabled: false
+        metricType: AverageValue
+        query: >-
+          sum(llm_d_epp_flow_control_queue_size{namespace="{{ .Release.Namespace }}",service="{{ .eppService }}",model_name="{{ .Values.model.name }}"})
+        threshold: "1"

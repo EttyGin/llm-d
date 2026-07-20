@@ -1,0 +1,48 @@
+## Istio Gateway for llm-d.
+## Port of guides/recipes/gateway/base/gateway.yaml +
+##         guides/recipes/gateway/istio/{gateway,configmap}.yaml
+##
+## Assumes Istio is already installed (e.g. via OLM / the Sail operator) and
+## provides the `istio` GatewayClass:  kubectl get gatewayclass istio
+##
+##   helm install ppc-gw charts/llm-d-gateway -f values/gateway/istio.yaml -n $NS
+
+gateway:
+  # Must match httpRoute.inferenceGatewayName in values/features/httproute-flags.yaml.
+  name: llm-d-inference-gateway
+  className: istio
+
+  # Required for Istio to run the GAIE ext-proc filter on this Gateway.
+  # Without it the EPP is never consulted and traffic is round-robined.
+  enableInferenceExtProc: true
+
+  listeners:
+    - name: default
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+
+infrastructure:
+  enabled: true
+  proxy:
+    logLevel: warn
+    componentLogLevel: "misc:warn"
+    outputLogLevel: "default:warn"
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        cpu: "8"
+        memory: 16Gi
+  service:
+    # ClusterIP for in-cluster benchmarking; LoadBalancer to expose externally.
+    type: ClusterIP
+
+# Istio access logging. Upstream ships this commented out as "DEBUG ONLY" —
+# it is very noisy under load.
+telemetry:
+  enabled: false
+  provider: envoy

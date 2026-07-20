@@ -1,0 +1,37 @@
+{{- if .Values.infrastructure.enabled }}
+{{- $p := .Values.infrastructure.proxy }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.gateway.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/gateway: {{ .Values.gateway.name }}
+    app.kubernetes.io/component: inference-gateway
+data:
+  # Strategic-merge patch applied by Istio to the generated gateway Deployment.
+  # The default gateway proxy is undersized and logs at info for LLM traffic
+  # volumes; both are corrected here.
+  deployment: |
+    spec:
+      template:
+        spec:
+          containers:
+          - name: istio-proxy
+            args:
+              - proxy
+              - router
+              - --domain
+              - $(POD_NAMESPACE).svc.cluster.local
+              - --proxyLogLevel
+              - {{ $p.logLevel }}
+              - --proxyComponentLogLevel
+              - {{ $p.componentLogLevel }}
+              - --log_output_level
+              - {{ $p.outputLogLevel }}
+            resources:
+              {{- toYaml $p.resources | nindent 14 }}
+  service: |
+    spec:
+      type: {{ .Values.infrastructure.service.type }}
+{{- end }}

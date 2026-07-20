@@ -1,0 +1,53 @@
+# llm-d Gateway — Gateway API v1.5.1, Istio provider.
+#
+# This chart does NOT install Istio. It assumes Istio is already installed
+# (e.g. via OLM / the Sail operator) and that the `istio` GatewayClass exists:
+#
+#   kubectl get gatewayclass istio
+#
+# It also assumes the Gateway API + GAIE CRDs are installed — see
+# scripts/install-crds.sh.
+
+gateway:
+  # The router chart's httpRoute.inferenceGatewayName must match this name.
+  name: llm-d-inference-gateway
+  className: istio
+
+  # Required by Istio to run the GAIE ext-proc filter on this Gateway.
+  # Without this label the EPP is never consulted and traffic is round-robined.
+  enableInferenceExtProc: true
+
+  listeners:
+    - name: default
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: All
+
+  annotations: {}
+  labels: {}
+
+# Istio-specific proxy sizing, passed through the Gateway's
+# infrastructure.parametersRef ConfigMap.
+infrastructure:
+  enabled: true
+  proxy:
+    logLevel: warn
+    componentLogLevel: "misc:warn"
+    outputLogLevel: "default:warn"
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        cpu: "8"
+        memory: 16Gi
+  service:
+    # ClusterIP for in-cluster benchmarking; use LoadBalancer to expose it.
+    type: ClusterIP
+
+# Istio access logging for the Gateway. Debug only — noisy under load.
+telemetry:
+  enabled: false
+  provider: envoy

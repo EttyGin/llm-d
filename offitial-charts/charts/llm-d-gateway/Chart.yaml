@@ -1,0 +1,9 @@
+apiVersion: v2
+name: llm-d-gateway
+description: >-
+  Kubernetes Gateway for llm-d in Gateway mode. Assumes the Gateway
+  implementation (Istio, installed via OLM) is already present in the cluster -
+  this chart only creates the Gateway and its infrastructure parameters.
+type: application
+version: 0.8.1
+appVersion: "1.5.1"

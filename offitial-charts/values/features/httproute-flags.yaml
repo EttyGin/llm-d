@@ -1,0 +1,10 @@
+## Creates the HTTPRoute binding the InferencePool to the Gateway.
+## Port of guides/recipes/router/features/httproute-flags.yaml
+## Required for Gateway mode; omit for Standalone (Envoy sidecar) mode.
+
+llmd:
+  httpRoute:
+    create: true
+    inferenceGatewayName: llm-d-inference-gateway
+    # On many providers, a requestTimeout of 0s means "provider maximum".
+    requestTimeout: "0s"

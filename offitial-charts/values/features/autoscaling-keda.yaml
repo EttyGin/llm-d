@@ -1,0 +1,77 @@
+## Autoscale the model servers on EPP metrics via KEDA.
+## Port of guides/workload-autoscaling/keda-epp/
+##
+## Apply to BOTH releases:
+##   -f values/features/monitoring.values.yaml \
+##   -f values/features/autoscaling-keda.yaml
+##
+## Prerequisites (neither is installed by these charts):
+##   1. KEDA          — https://keda.sh/docs/2.20/deploy/
+##   2. Prometheus    — scraping the EPP. values/features/monitoring.values.yaml
+##                      creates the ServiceMonitor and disables EPP /metrics
+##                      bearer-token auth so a plain Prometheus can scrape it.
+##
+## Composes with precise-prefix-cache-routing: the EPP keeps making
+## prefix-aware routing decisions per request, while KEDA independently resizes
+## the pool underneath it. Scaling the pool does not disturb the KV index —
+## new pods are discovered via `discoverPods`, and evicted pods' blocks age out.
+
+## ---- llm-d-router ----
+## Only values — nothing in the router chart changes.
+## flowControl is already on via values/guides/flow-control.yaml, which is what
+## emits llm_d_epp_flow_control_queue_size. Monitoring must also be enabled
+## (values/features/monitoring.values.yaml) or Prometheus has nothing to scrape.
+
+## ---- llm-d-modelserver ----
+autoscaling:
+  keda:
+    enabled: true
+
+    minReplicas: 1
+    maxReplicas: 8
+
+    # REQUIRED. The EPP Service is "<router release>-epp" — named after the
+    # ROUTER release, not the guide label and not this chart's release.
+    # With `make install RELEASE=ppc` the router release is `ppc`, so:
+    eppServiceName: "ppc-epp"
+
+    prometheus:
+      # Plain in-cluster Prometheus. For the bundled kube-prometheus-stack use
+      # its TLS address and enable auth below, e.g.
+      #   https://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090
+      serverAddress: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+      auth:
+        enabled: false
+        # When enabling: copy the Prometheus CA into this namespace as the
+        # `keda-prometheus-auth` Secret first. Extend secretTargetRef for
+        # bearer, mTLS, basic or workload-identity auth as your setup requires.
+        name: keda-prometheus-auth
+        create: true
+        secretTargetRef:
+          - parameter: ca
+            name: keda-prometheus-auth
+            key: ca.crt
+
+    triggers:
+      # Active running requests across the pool. Reacts to real load and does
+      # not depend on the flowControl gate.
+      - name: epp-running-requests
+        enabled: true
+        metricType: AverageValue
+        query: >-
+          sum(llm_d_epp_request_running{namespace="{{ .Release.Namespace }}",service="{{ .eppService }}",model_name="{{ .Values.model.name }}"})
+        # Target running requests per replica — tune to your per-replica
+        # max concurrency.
+        threshold: "16"
+
+      # Requests waiting for backend capacity. Emitted ONLY when the router's
+      # flowControl feature gate is on. This is the earlier signal (it rises
+      # before saturation shows up in running-requests), but on small clusters
+      # it can stay at 0 because requests are admitted immediately — in that
+      # case running-requests above is the one that actually moves.
+      - name: epp-queue-size
+        enabled: false
+        metricType: AverageValue
+        query: >-
+          sum(llm_d_epp_flow_control_queue_size{namespace="{{ .Release.Namespace }}",service="{{ .eppService }}",model_name="{{ .Values.model.name }}"})
+        threshold: "1"

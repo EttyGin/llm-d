@@ -1,0 +1,74 @@
+## flow-control guide overrides for the router.
+## Port of guides/flow-control/router/flow-control.values.yaml + objectives.yaml
+##
+## Layer on top of: values/base.values.yaml
+## Composes with:   values/guides/precise-prefix-cache-routing.yaml
+##
+## NOTE: upstream cannot stack these two guides. Its EPP config is an opaque
+## YAML *string* under `epp.pluginsCustomConfig`, so a second -f replaces the
+## first wholesale (last-wins) rather than merging. Because this chart models
+## the config as structured values under `eppPlugins`, Helm deep-merges the two
+## overlays and you get precise prefix-cache routing *and* flow control.
+##
+## This file deliberately does NOT set `modelServers.matchLabels` — flow control
+## is a capability layer, not a separate deployment, so it inherits whichever
+## guide label the overlay beneath it established.
+
+eppPlugins:
+  flowControl:
+    # Emits `featureGates: [flowControl]` in the EndpointPickerConfig.
+    enabled: true
+    maxBytes: "10Gi"
+    maxRequests: "1k"
+    defaultRequestTTL: "60s"
+
+    # The system default is `utilization-detector`. Production deployments
+    # should use `concurrency-detector` to avoid telemetry lag — see
+    # guides/flow-control/tuning.md.
+    #
+    # maxConcurrency must be calibrated for your fleet: roughly
+    # (model server replicas x per-replica max concurrent requests).
+    # 132 is upstream's value for 8 replicas of Qwen3-32B on 16xH100.
+    saturationDetector:
+      type: concurrency-detector
+      parameters:
+        maxConcurrency: 132
+        concurrencyMode: requests
+        headroom: 0.0
+
+    fairnessPolicy: round-robin-fairness-policy
+    orderingPolicy: fcfs-ordering-policy
+
+    priorityBands:
+      - priority: 100
+        maxRequests: "500"
+      - priority: 0
+        maxRequests: "200"
+      - priority: -10
+        maxRequests: "50"
+
+llmd:
+  router:
+    # Rendered as InferenceObjective resources (llm-d.ai/v1alpha2 — a real CRD,
+    # installed by scripts/install-crds.sh). Priorities MUST line up with the
+    # priorityBands above; clients select one via the
+    # `x-llm-d-inference-objective` header.
+    inferenceObjectives:
+      - name: premium-traffic
+        priority: 100
+      - name: standard-traffic
+        priority: 0
+      - name: best-effort-traffic
+        priority: -10
+
+    # Flow control exposes queue-depth metrics on 9090
+    # (llm_d_epp_flow_control_queue_size).
+    extraServicePorts:
+      - name: http
+        port: 80
+        protocol: TCP
+        targetPort: 8081
+      - name: metrics
+        port: 9090
+        protocol: TCP
+        targetPort: 9090

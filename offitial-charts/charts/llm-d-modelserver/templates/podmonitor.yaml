@@ -1,0 +1,17 @@
+{{- if .Values.monitoring.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "llm-d-modelserver.name" . }}-decode
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-modelserver.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "llm-d-modelserver.decodeSelectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: modelserver
+      path: {{ .Values.monitoring.podMonitor.path }}
+      interval: {{ .Values.monitoring.podMonitor.interval }}
+{{- end }}

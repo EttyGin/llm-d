@@ -1,0 +1,16 @@
+apiVersion: v2
+name: llm-d-router
+description: >-
+  llm-d Router (EPP) in Gateway mode - precise prefix-cache aware routing with
+  the flowControl feature gate. Thin wrapper over the official
+  llm-d-router-gateway chart, adding a templated EndpointPickerConfig.
+type: application
+version: 0.8.1
+appVersion: v0.9.0
+dependencies:
+  # Official llm-d chart, pulled from OCI. Bump `version` and re-run
+  # `helm dependency update charts/llm-d-router` to move to a new release.
+  - name: llm-d-router-gateway
+    alias: llmd
+    version: v0.9.0
+    repository: oci://ghcr.io/llm-d/charts

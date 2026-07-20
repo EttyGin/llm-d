@@ -1,0 +1,33 @@
+## NVIDIA GPU / vLLM overlay — the guide default.
+## Port of guides/precise-prefix-cache-routing/modelserver/gpu/vllm/base/
+##      + guides/recipes/modelserver/components/images/gpu-vllm/
+##
+## Canonical benchmark shape: 8 replicas x TP2 = 16 GPUs (16xH100).
+## Reduce `decode.replicas` for smaller fleets.
+
+model:
+  name: Qwen/Qwen3-32B
+  label: Qwen3-32B
+
+accelerator:
+  variant: gpu
+  vendor: nvidia
+
+decode:
+  engine: vllm
+  replicas: 8
+  tensorParallelSize: 2
+  image:
+    repository: vllm/vllm-openai
+    tag: v0.23.0
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "8"
+      memory: 96Gi
+      nvidia.com/gpu: 2
+    limits:
+      cpu: "16"
+      memory: 128Gi
+      nvidia.com/gpu: 2
+  shmSize: 20Gi

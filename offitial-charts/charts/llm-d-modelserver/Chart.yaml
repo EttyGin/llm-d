@@ -1,0 +1,9 @@
+apiVersion: v2
+name: llm-d-modelserver
+description: >-
+  vLLM/SGLang model servers for the llm-d precise prefix-cache routing well-lit
+  path, plus the standalone `vllm launch render` tokenizer Service the EPP
+  token-producer plugin calls. Helm port of the llm-d 0.8.1 kustomize overlays.
+type: application
+version: 0.8.1
+appVersion: v0.23.0

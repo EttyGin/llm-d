@@ -1,0 +1,23 @@
+## Enables Prometheus monitoring for the router.
+## Port of guides/recipes/router/features/monitoring.values.yaml
+## Requires the Prometheus Operator (ServiceMonitor CRD).
+
+## ---- llm-d-router ----
+llmd:
+  router:
+    monitoring:
+      interval: "10s"
+      prometheus:
+        enabled: true
+        auth:
+          # EPP /metrics requires a bearer token by default. Set false to allow
+          # unauthenticated access (e.g. a plain in-cluster Prometheus, or curl
+          # while debugging) — otherwise scrapes 401 and the target shows down.
+          enabled: false
+
+## ---- llm-d-modelserver ----
+monitoring:
+  podMonitor:
+    enabled: true
+    interval: 30s
+    path: /metrics

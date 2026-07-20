@@ -1,0 +1,119 @@
+{{- if .Values.render.enabled }}
+{{- $r := .Values.render }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-d-modelserver.renderName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-modelserver.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $r.replicas }}
+  selector:
+    matchLabels:
+      {{- include "llm-d-modelserver.renderSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "llm-d-modelserver.renderSelectorLabels" . | nindent 8 }}
+        {{- with $r.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $r.annotations }}
+      annotations:
+        {{- range $k, $v := . }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+      {{- end }}
+    spec:
+      # The renderer only tokenizes over HTTP; no Kubernetes API access needed.
+      automountServiceAccountToken: false
+      {{- with $r.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: vllm-render
+          # GPU-less image: `vllm launch render` tokenizes only, no weights.
+          image: "{{ $r.image.repository }}:{{ $r.image.tag }}"
+          imagePullPolicy: {{ $r.image.pullPolicy }}
+          {{- with $r.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: ["vllm", "launch", "render"]
+          args:
+            - "{{ .Values.model.name }}"
+            - "--port={{ $r.port }}"
+          ports:
+            - name: render-http
+              containerPort: {{ $r.port }}
+          env:
+            # Points at the emptyDir below so tokenizer files are cached for
+            # the pod's lifetime.
+            - name: HF_HOME
+              value: /tmp/hf
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.hfTokenSecret.name }}
+                  key: {{ .Values.hfTokenSecret.key }}
+            - name: DO_NOT_TRACK
+              value: "1"
+          resources:
+            {{- toYaml $r.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: render-http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /tmp/hf
+      volumes:
+        - name: hf-cache
+          emptyDir: {}
+      {{- with $r.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Named from the guide label, matching what the router's token-producer
+  # defaults to: http://<guide>-render:8000.
+  name: {{ include "llm-d-modelserver.renderName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-modelserver.labels" . | nindent 4 }}
+  {{- with $r.serviceAnnotations }}
+  annotations:
+    {{- range $k, $v := . }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+  {{- end }}
+spec:
+  selector:
+    {{- include "llm-d-modelserver.renderSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: render-http
+      port: {{ $r.port }}
+      targetPort: render-http
+      protocol: TCP
+{{- end }}

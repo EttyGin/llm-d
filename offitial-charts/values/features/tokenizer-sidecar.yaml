@@ -1,0 +1,44 @@
+## Alternative tokenization topology: `vllm launch render` as a SIDECAR in the
+## EPP pod (loopback), instead of the standalone render Service.
+##
+## Both topologies are officially supported — see
+## docs/architecture/advanced/kv-management/prefix-cache-aware-routing.md:
+## "typically a `vllm launch render` sidecar in the EPP pod (loopback) or a
+## shared render Service".
+##
+## Apply to BOTH the router and modelserver releases.
+##
+## Trade-off: removes a Deployment, a Service, and a network hop from the TTFT
+## critical path, but pins render capacity 1:1 to EPP replicas. Prefer it for
+## dev clusters and small fleets; prefer the Service once tokenization
+## throughput and EPP replica count must scale independently.
+
+## ---- llm-d-router ----
+eppPlugins:
+  tokenizer:
+    # Loopback to the sidecar rather than the render Service.
+    url: "http://localhost:8000"
+
+llmd:
+  router:
+    tokenizer:
+      enabled: true
+      # Required when enabled — positional arg to `vllm launch render`.
+      modelName: Qwen/Qwen3-32B
+      image:
+        registry: docker.io
+        repository: vllm/vllm-openai-cpu
+        # Chart default is v0.19.1; pin to the version the standalone render
+        # Deployment uses upstream so tokenizer and serving stay in sync.
+        tag: v0.23.0
+        pullPolicy: IfNotPresent
+      port: 8000
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+
+## ---- llm-d-modelserver ----
+## The standalone render pool is redundant once the sidecar is on.
+render:
+  enabled: false
