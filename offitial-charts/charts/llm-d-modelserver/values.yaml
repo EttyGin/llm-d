@@ -22,6 +22,43 @@ accelerator:
   variant: gpu
   vendor: nvidia
 
+# ---------------------------------------------------------------------------
+# Model cache volume
+#
+# Mount an EXISTING PVC (or hostPath) that already holds the model, so weights
+# are loaded from disk instead of downloaded. This chart NEVER creates a PVC —
+# you provide one that already exists.
+#
+# Typical use: a ReadOnlyMany PVC pre-populated with an HF cache tree
+# (…/hub/models--org--name/…), shared across replicas.
+#
+#   modelCache:
+#     enabled: true
+#     existingClaim: my-model-pvc   # must already exist in the namespace
+#     mountPath: /model-cache
+#     setHfHome: true               # export HF_HOME=<mountPath>
+#     offline: true                 # HF_HUB_OFFLINE=1 — never hit the network
+#     readOnly: true
+#
+# If the PVC's HF cache lives in a subdirectory, point mountPath's HF_HOME at
+# it via `subPath`, or set mountPath so that <mountPath>/hub exists.
+# ---------------------------------------------------------------------------
+modelCache:
+  enabled: false
+  # Name of an EXISTING PVC to mount. Required when enabled (unless hostPath).
+  existingClaim: ""
+  # Alternative to a PVC: a node hostPath (single-node/dev). One of
+  # existingClaim or hostPath must be set when enabled.
+  hostPath: ""
+  mountPath: /model-cache
+  # Export HF_HOME=<mountPath> so huggingface_hub finds the cached model.
+  setHfHome: true
+  # Set HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE — fail rather than download.
+  offline: false
+  readOnly: true
+  # Mount only this subdirectory of the volume (optional).
+  subPath: ""
+
 hfTokenSecret:
   # Set false for public models. A dummy/invalid HF_TOKEN is WORSE than none:
   # huggingface_hub sends it as `Authorization: Bearer <token>`, the CDN

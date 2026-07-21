@@ -233,6 +233,29 @@ decode:
     - name: my-registry-creds
 ```
 
+### Loading the model from an existing PVC
+
+`modelCache` mounts a PVC (or hostPath) you already created — the chart **never
+creates a PVC**. Weights are read from it instead of downloaded, which is the
+clean way to serve on air-gapped or filtered networks, or to share one cached
+copy across replicas.
+
+```yaml
+modelCache:
+  enabled: true
+  existingClaim: my-model-pvc    # must already exist in the namespace
+  mountPath: /model-cache
+  setHfHome: true                # exports HF_HOME=/model-cache
+  offline: true                  # HF_HUB_OFFLINE=1 — never hit the network
+  readOnly: true                 # a ReadOnlyMany PVC can back every replica
+```
+
+The PVC should hold a Hugging Face cache tree (`…/hub/models--org--name/…`).
+If it lives in a subdirectory, use `modelCache.subPath` or set `mountPath` so
+`<mountPath>/hub` resolves. Set `hostPath` instead of `existingClaim` for a
+single-node/dev cluster. Enabling it without either fails the render with a
+clear message rather than producing a broken Deployment.
+
 The same `annotations` / `podLabels` / `podSecurityContext` / `securityContext`
 / `imagePullSecrets` keys exist under `render`, plus `render.serviceAnnotations`
 for the Service object.

@@ -116,6 +116,21 @@ spec:
             # Applied by the gpu-vllm image component upstream.
             - name: USER
               value: llm-d
+            {{- if .Values.modelCache.enabled }}
+            # Point the HF cache at the mounted volume so weights already
+            # present there are used instead of re-downloaded.
+            {{- if .Values.modelCache.setHfHome }}
+            - name: HF_HOME
+              value: {{ .Values.modelCache.mountPath | quote }}
+            {{- end }}
+            {{- if .Values.modelCache.offline }}
+            # Never reach the network — fail if the model is not already cached.
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            {{- end }}
+            {{- end }}
             {{- with $d.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -150,6 +165,14 @@ spec:
             # Usage-telemetry writes land in /.config.
             - name: vllm-config
               mountPath: /.config
+            {{- if .Values.modelCache.enabled }}
+            - name: model-cache
+              mountPath: {{ .Values.modelCache.mountPath | quote }}
+              readOnly: {{ .Values.modelCache.readOnly }}
+              {{- with .Values.modelCache.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
+            {{- end }}
             {{- with $d.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -164,6 +187,20 @@ spec:
           emptyDir: {}
         - name: vllm-config
           emptyDir: {}
+        {{- if .Values.modelCache.enabled }}
+        - name: model-cache
+          {{- if .Values.modelCache.existingClaim }}
+          # Mount an EXISTING PVC — this chart never creates one.
+          persistentVolumeClaim:
+            claimName: {{ .Values.modelCache.existingClaim }}
+          {{- else if .Values.modelCache.hostPath }}
+          hostPath:
+            path: {{ .Values.modelCache.hostPath }}
+            type: Directory
+          {{- else }}
+          {{- fail "modelCache.enabled=true requires either modelCache.existingClaim (a PVC name) or modelCache.hostPath" }}
+          {{- end }}
+        {{- end }}
         {{- with $d.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
