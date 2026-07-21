@@ -22,7 +22,9 @@ hfTokenSecret:
 # Standalone render (tokenizer) Service. Port of
 # guides/precise-prefix-cache-routing/render/.
 render:
-  enabled: true
+  # OFF by default — tokenization runs as an EPP sidecar (router chart default).
+  # Layer values/features/render-service.yaml to use a shared render Service.
+  enabled: false
   replicas: 3
   image:
     repository: docker.io/vllm/vllm-openai-cpu

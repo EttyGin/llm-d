@@ -2,7 +2,7 @@
 ##
 ##   make install NAMESPACE=llm-d HF_TOKEN=hf_xxx
 ##   make install NAMESPACE=llm-d HF_TOKEN=hf_xxx SMOKE=1     # 1 GPU, Qwen3-0.6B
-##   make install NAMESPACE=llm-d HF_TOKEN=hf_xxx SIDECAR=1   # render as EPP sidecar
+##   make install NAMESPACE=llm-d HF_TOKEN=hf_xxx RENDER_SVC=1 # tokenizer as shared Service (default: sidecar)
 ##   make install NAMESPACE=llm-d HF_TOKEN=hf_xxx AUTOSCALE=1 # KEDA on EPP metrics
 ##
 ## The values layering below mirrors the upstream guide install commands:
@@ -12,7 +12,7 @@ NAMESPACE  ?= llm-d
 RELEASE    ?= ppc
 HF_TOKEN   ?=
 SMOKE      ?=
-SIDECAR    ?=
+RENDER_SVC ?=
 AUTOSCALE  ?=
 HELM_EXTRA ?=
 
@@ -33,9 +33,9 @@ MS_SMOKE_VALUES := \
 
 GW_VALUES := -f values/gateway/istio.yaml
 
-ifdef SIDECAR
-ROUTER_VALUES += -f values/features/tokenizer-sidecar.yaml
-MS_VALUES     += -f values/features/tokenizer-sidecar.yaml
+ifdef RENDER_SVC
+ROUTER_VALUES += -f values/features/render-service.yaml
+MS_VALUES     += -f values/features/render-service.yaml
 endif
 
 ifdef AUTOSCALE

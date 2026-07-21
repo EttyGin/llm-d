@@ -96,7 +96,7 @@ offitial-charts/
 │   │   ├── httproute-flags.yaml
 │   │   ├── monitoring.values.yaml
 │   │   ├── tracing.values.yaml
-│   │   └── tokenizer-sidecar.yaml
+│   │   └── render-service.yaml
 │   ├── gateway/
 │   │   └── istio.yaml                   <- recipes/gateway/{base,istio}/
 │   └── modelserver/
@@ -134,7 +134,7 @@ Variants:
 
 ```bash
 make install ... SMOKE=1              # 1 GPU, 1 replica, Qwen3-0.6B
-make install ... SIDECAR=1            # render as EPP sidecar, no render Service
+make install ... RENDER_SVC=1         # tokenizer as shared Service (default is sidecar)
 make config                           # print the generated EndpointPickerConfig
 ```
 
@@ -419,13 +419,13 @@ helm upgrade --install ppc charts/llm-d-router -n $NS \
   -f values/base.values.yaml \
   -f values/guides/precise-prefix-cache-flowcontrol.yaml \
   -f values/features/httproute-flags.yaml \
-  -f values/features/tokenizer-sidecar.yaml
+  -f values/features/render-service.yaml
 
 # Model servers: GPU/vLLM production image, render Service disabled
 helm upgrade --install ppc-ms charts/llm-d-modelserver -n $NS \
   -f values/modelserver/base.values.yaml \
   -f values/modelserver/gpu-vllm.yaml \
-  -f values/features/tokenizer-sidecar.yaml
+  -f values/features/render-service.yaml
 ```
 
 Produces:
@@ -442,40 +442,32 @@ the GPU-less `vllm-openai-cpu` image on purpose — it only tokenizes, so it nee
 no GPU and lets the EPP pod schedule on a CPU node; see the note below before
 switching it to the full image.
 
-## Tokenization topology: sidecar vs. Service
+## Tokenization topology: sidecar (default) vs. Service
 
-Precise prefix-cache routing needs **exact token IDs** before it can route: the
-KV index is keyed by hashes of 64-token blocks, so the EPP tokenizes every
-prompt before scoring, by calling vLLM's `/v1/completions/render`.
+Precise prefix-cache routing needs exact token IDs before it can route, so the
+EPP tokenizes every prompt via vLLM's `/v1/completions/render`. Two supported
+topologies (docs/architecture/advanced/kv-management/prefix-cache-aware-routing.md):
 
-Upstream supports both topologies —
-`docs/architecture/advanced/kv-management/prefix-cache-aware-routing.md`:
+**Default here: sidecar.** `vllm launch render` runs as a container in the EPP
+pod; the token-producer dials `http://localhost:8000`. One fewer Deployment and
+Service, no network hop on the TTFT path. The render Service is not deployed.
 
-> "…typically a `vllm launch render` **sidecar in the EPP pod** (loopback) **or
-> a shared render Service**…"
+**Alternative: shared Service.** Add `-f values/features/render-service.yaml`
+to BOTH releases — it turns the sidecar off and deploys a standalone,
+independently scalable `<guideLabel>-render` Service (3 replicas). Use it when
+tokenization throughput must scale independently of EPP replicas (e.g. the
+upstream 8-replica / 16xH100 benchmark).
 
-The chart ships `router.tokenizer.enabled: false`, so upstream picks per guide.
-`precise-prefix-cache-routing` — the only well-lit path doing exact
-tokenization — chose the **Service**, and these values default to that.
-
-|  | Sidecar | Service (default) |
+|  | Sidecar (default) | Service |
 |---|---|---|
-| Moving parts | EPP Deployment only | + Deployment + Service |
-| Network | loopback | ClusterIP hop on the TTFT critical path |
-| Scaling | pinned 1:1 to EPP replicas | independent of EPP replicas |
-| EPP pod footprint | +4 CPU / 8Gi per replica | unchanged |
+| Pods | tokenizer in the EPP pod | + Deployment + Service |
+| Network | loopback | ClusterIP hop |
+| Scaling | 1:1 with EPP replicas | independent |
+| token-producer url | `http://localhost:8000` | `http://<guideLabel>-render:8000` |
 
-Sidecar for dev clusters and small fleets; Service once tokenization throughput
-and EPP replica count must scale independently. Upstream uses the Service
-because it benchmarks at 8 replicas on 16×H100.
-
-```bash
-make install ... SIDECAR=1
-# or: -f values/features/tokenizer-sidecar.yaml  (on BOTH releases)
-```
-
-That profile also pins the sidecar image to `v0.23.0` — the chart's own default
-is `v0.19.1`, older than the render Deployment upstream actually uses.
+> The url lives in the guide's raw EPP config. The guide files ship with
+> `localhost:8000` (sidecar). If you switch to the Service, change that url to
+> `http://<guideLabel>-render:8000` in the guide file's pluginsCustomConfig.
 
 ## How the EPP config is supplied
 

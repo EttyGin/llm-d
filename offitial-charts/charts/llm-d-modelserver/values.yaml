@@ -173,7 +173,9 @@ decode:
 # it stays structured. Disable it with the tokenizer-sidecar feature.
 # ---------------------------------------------------------------------------
 render:
-  enabled: true
+  # OFF by default — tokenization runs as an EPP sidecar (router chart default).
+  # Layer values/features/render-service.yaml to use a shared render Service.
+  enabled: false
   replicas: 1
   image:
     repository: docker.io/vllm/vllm-openai-cpu

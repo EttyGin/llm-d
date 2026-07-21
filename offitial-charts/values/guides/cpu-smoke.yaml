@@ -13,6 +13,8 @@
 
 llmd:
   router:
+    tokenizer:
+      modelName: Qwen/Qwen2.5-0.5B-Instruct  # sidecar tokenizes the small model
     epp:
       replicas: 1
       env:
@@ -39,7 +41,7 @@ llmd:
               parameters:
                 modelName: Qwen/Qwen2.5-0.5B-Instruct
                 vllm:
-                  url: "http://precise-prefix-cache-routing-render:8000"
+                  url: "http://localhost:8000" # EPP tokenizer sidecar (loopback)
             - type: endpoint-notification-source
             - type: precise-prefix-cache-producer
               parameters:

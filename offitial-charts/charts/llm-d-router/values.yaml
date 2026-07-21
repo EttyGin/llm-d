@@ -71,8 +71,27 @@ llmd:
       pluginsConfigFile: "default-plugins.yaml"
       pluginsCustomConfig: {}
 
+    # Tokenizer runs as a SIDECAR in the EPP pod by default (loopback). The
+    # EPP token-producer dials it at http://localhost:8000 (see the guide
+    # configs). To use a shared render Service instead, layer
+    # values/features/render-service.yaml (sets enabled: false here and
+    # deploys the Service from the modelserver chart).
     tokenizer:
-      enabled: false
+      enabled: true
+      # Must match the model the servers serve and the token-producer modelName.
+      modelName: Qwen/Qwen3-32B
+      image:
+        registry: docker.io
+        # GPU-less: `vllm launch render` only tokenizes. Pinned to the same
+        # vLLM release the model servers run.
+        repository: vllm/vllm-openai-cpu
+        tag: v0.23.0
+        pullPolicy: IfNotPresent
+      port: 8000
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
 
     # Gateway mode: the Gateway's proxy handles the data plane.
     proxy:

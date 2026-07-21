@@ -33,7 +33,7 @@ llmd:
               parameters:
                 modelName: Qwen/Qwen3-32B # Must match the render Service model and the deployed model server
                 vllm:
-                  url: "http://precise-prefix-cache-routing-render:8000"
+                  url: "http://localhost:8000" # EPP tokenizer sidecar (loopback)
             - type: endpoint-notification-source
             - type: precise-prefix-cache-producer
               parameters:

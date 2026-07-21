@@ -1,0 +1,25 @@
+## Switch tokenization from the default EPP sidecar to a shared, independently
+## scalable `vllm launch render` SERVICE.
+##
+## Apply to BOTH releases:
+##   -f values/features/render-service.yaml
+##
+## The default (no overlay) runs the tokenizer as a sidecar in the EPP pod
+## (loopback, one fewer Deployment/Service, no network hop). Use the Service
+## when tokenization throughput must scale independently of EPP replicas — e.g.
+## the upstream benchmark at 8 model-server replicas on 16xH100.
+##
+## IMPORTANT: the token-producer url in your guide config points at
+## http://localhost:8000 (sidecar). When you switch to the Service you must also
+## change that url to http://<guideLabel>-render:8000. Do it in the guide file's
+## pluginsCustomConfig, or override the whole config — it is raw YAML.
+
+## ---- llm-d-router ----
+llmd:
+  router:
+    tokenizer:
+      enabled: false   # turn OFF the sidecar
+
+## ---- llm-d-modelserver ----
+render:
+  enabled: true        # deploy the standalone render Service (3 replicas)
