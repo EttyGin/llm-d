@@ -150,6 +150,9 @@ spec:
             # Usage-telemetry writes land in /.config.
             - name: vllm-config
               mountPath: /.config
+            {{- with $d.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: shm
           emptyDir:
@@ -161,6 +164,9 @@ spec:
           emptyDir: {}
         - name: vllm-config
           emptyDir: {}
+        {{- with $d.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with $d.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -1,0 +1,26 @@
+## Loads weights from a pre-seeded node hostPath instead of downloading.
+## Use on air-gapped / filtered networks where the in-image huggingface_hub
+## cannot fetch weights. Seed first (see RUNBOOK "pre-seed"), then layer this
+## AFTER cpu-vllm.yaml so its extraEnv/extraVolumes win.
+decode:
+  extraEnv:
+    - name: VLLM_CPU_KVCACHE_SPACE
+      value: "1"
+    - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+      value: "1"
+    # Never hit the network for weights — read the mounted cache only.
+    - name: HF_HOME
+      value: /hf-home/hf
+    - name: HF_HUB_OFFLINE
+      value: "1"
+    - name: TRANSFORMERS_OFFLINE
+      value: "1"
+  extraVolumes:
+    - name: hf-seed
+      hostPath:
+        path: /data/hf-models
+        type: Directory
+  extraVolumeMounts:
+    - name: hf-seed
+      mountPath: /hf-home
+      readOnly: true

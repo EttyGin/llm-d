@@ -49,16 +49,39 @@ decode:
   extraArgs:
     # Both required on the CPU backend by upstream's overlay.
     - "--disable-hybrid-kv-cache-manager"
-    - "--max_model_len=8192"
+    # 2048 (not upstream's 8192) to keep total memory under the cgroup limit on
+    # a laptop-scale node — an 8192 context needs a bigger KV allocation than
+    # the 5Gi limit below allows, and the CPU worker gets OOM-killed at init.
+    - "--max_model_len=2048"
     # Precise prefix cache routing is meaningless without the prefix cache.
     - "--enable-prefix-caching"
 
   extraEnv:
-    # KV cache size in GiB. Upstream uses 32; sized down to fit the node.
+    # KV cache size in GiB. Upstream uses 32; 1 here so model (~1Gi bf16) +
+    # KV + torch overhead fit inside the 5Gi limit. Raising this OOM-kills the
+    # CPU worker during engine init (exit 1, "WorkerProc initialization failed").
     - name: VLLM_CPU_KVCACHE_SPACE
-      value: "4"
+      value: "1"
     - name: VLLM_CPU_NUM_OF_RESERVED_CPU
       value: "1"
+    # Route weight downloads through the classic HF LFS CDN instead of the
+    # newer Xet bridge (us.aws.cdn.hf.co). Required on networks whose content
+    # filter blocks the Xet CDN — without it the download stalls at a 0-byte
+    # .incomplete blob. Verified: with this set, a 988MB safetensors pulled in
+    # ~13s on a network where the Xet CDN returned a block page.
+    - name: HF_HUB_DISABLE_XET
+      value: "1"
+    # Trust the network's TLS-interception CA (mounted by
+    # values/features/network-ca.yaml). Without this, the httpx-based weight
+    # download fails with CERTIFICATE_VERIFY_FAILED on a MITM'd network.
+    # Harmless if the mount is absent (the file just won't exist and clients
+    # fall back to the system bundle only for the missing path).
+    - name: SSL_CERT_FILE
+      value: /etc/ssl/network-ca/ca-bundle.crt
+    - name: REQUESTS_CA_BUNDLE
+      value: /etc/ssl/network-ca/ca-bundle.crt
+    - name: CURL_CA_BUNDLE
+      value: /etc/ssl/network-ca/ca-bundle.crt
 
   securityContext:
     # Verbatim from upstream's CPU overlay — the CPU backend pins threads.
@@ -79,7 +102,7 @@ decode:
       nvidia.com/gpu: null
     limits:
       cpu: "3"
-      memory: 5Gi
+      memory: 6Gi
       nvidia.com/gpu: null
 
   shmSize: 2Gi

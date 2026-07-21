@@ -1,0 +1,55 @@
+## Trust a network's TLS-interception CA (corporate / content-filter proxy).
+##
+## On networks that MITM outbound HTTPS (e.g. a Netspark/etrog content filter),
+## the model server's weight download fails with:
+##   httpx.ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED]
+##     certificate verify failed: self-signed certificate in certificate chain
+##
+## This is NOT circumvention — it makes the pod trust the CA the network
+## operator already installed on managed hosts, so TLS verification passes for
+## the content the filter permits. Blocked content stays blocked.
+##
+## Prerequisite: a ConfigMap in the namespace holding a CA bundle that includes
+## both the public roots and the interception CA chain, e.g.
+##
+##   # extract the interception chain
+##   openssl s_client -showcerts -connect us.aws.cdn.hf.co:443 \
+##     -servername us.aws.cdn.hf.co </dev/null 2>/dev/null \
+##     | awk '/BEGIN CERT/,/END CERT/' > net-ca.pem
+##   cat /etc/ssl/certs/ca-certificates.crt net-ca.pem > combined-ca.pem
+##   kubectl create configmap network-ca-bundle -n $NAMESPACE \
+##     --from-file=ca-bundle.crt=combined-ca.pem
+##
+## Then apply this file to the modelserver release.
+
+## ---- llm-d-modelserver ----
+decode:
+  extraVolumes:
+    - name: network-ca
+      configMap:
+        name: network-ca-bundle
+  extraVolumeMounts:
+    - name: network-ca
+      mountPath: /etc/ssl/network-ca
+      readOnly: true
+  # IMPORTANT: Helm REPLACES lists, it does not merge them. Because your model
+  # overlay (e.g. cpu-vllm.yaml) already sets decode.extraEnv, you cannot add a
+  # second extraEnv here — the last -f wins and one set is lost. Put these three
+  # env vars in the SAME extraEnv list as your other vars instead:
+  #
+  #   - name: SSL_CERT_FILE
+  #     value: /etc/ssl/network-ca/ca-bundle.crt
+  #   - name: REQUESTS_CA_BUNDLE
+  #     value: /etc/ssl/network-ca/ca-bundle.crt
+  #   - name: CURL_CA_BUNDLE
+  #     value: /etc/ssl/network-ca/ca-bundle.crt
+
+render:
+  extraVolumes:
+    - name: network-ca
+      configMap:
+        name: network-ca-bundle
+  extraVolumeMounts:
+    - name: network-ca
+      mountPath: /etc/ssl/network-ca
+      readOnly: true

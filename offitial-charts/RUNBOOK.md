@@ -323,69 +323,102 @@ traffic is expected, not a fault.
 | Prometheus scraping EPP | ✅ verified |
 | KEDA → Prometheus → HPA reading a real value | ✅ verified |
 | vLLM accepts `--block-size 64` + KV events on CPU | ✅ verified |
-| **Model weights loaded / inference served** | ❌ **blocked** |
-| **Prefix-cache hit-rate + autoscale-under-load** | ❌ **not reached** |
+| Model weights loaded (via pre-seed) | ✅ verified |
+| **Inference served through the Gateway (HTTP 200)** | ✅ **verified** |
+| EPP subscribed to the pod's ZMQ KV socket (`tcp://<pod>:5556`) | ✅ verified |
+| **Autoscaler scaled up on live EPP load** (desired 1→2→3) | ✅ **verified** |
 
-### Why the last two did not complete
+### The network hurdle (and how it was cleared)
 
-This network **TLS-intercepts and blocks the Hugging Face LFS CDN**. The main
-site is untouched, but every weights download 302-redirects to
-`us.aws.cdn.hf.co`, whose certificate is issued by:
+This network runs a **Netspark / etrog content filter that TLS-intercepts and
+blocks the Hugging Face weights CDN**. The main site is untouched, but every
+weights fetch 302-redirects to `us.aws.cdn.hf.co`, whose cert is issued by
+`O = Netspark, CN = www.netspark.com`, and the appliance returns an **HTTP 200
+787-byte HTML block page** instead of the file. vLLM then dies at init with:
 
 ```
-CN = huggingface.co
-  i: O = Netspark, CN = www.netspark.com
-     O = Netspark, OU = Netspark RIM, CN = www.netspark.com
+httpx.ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate in certificate chain
+...later, after trusting the CA...
+OSError: Consistency check failed: file should be of size 988097824 but has size 787
 ```
 
-Adding that chain to the trust store fixes the TLS error but the download still
-does not proceed — the appliance returns **HTTP 200 with a 787-byte HTML block
-page**:
+Three things were needed, all now expressed as chart values / overlays:
 
-```html
-<script>window.location="https://safepage.etrog.net.il/?a=block/block1&level=5
-  &url=...model.safetensors...&cause=url_"</script>
-```
+**7a. HF token must be real or absent, never a placeholder.** A dummy token
+stalls the download at a 0-byte blob. `hfTokenSecret.enabled: false` for public
+models (the CPU overlay sets it).
 
-Verified against `Qwen/Qwen2.5-0.5B-Instruct`, `facebook/opt-125m`,
-`sshleifer/tiny-gpt2` and `hf-internal-testing/tiny-random-LlamaForCausalLM` —
-all route through the same blocked CDN. Tokenizer/config files come from a
-different path and download fine, which is why the render pod is healthy while
-decode is not.
+**7b. Trust the network CA** so httpx TLS verification passes
+(`values/features/network-ca.yaml` + a `network-ca-bundle` ConfigMap). This
+alone was not enough here — the in-image `huggingface_hub` ignores
+`HF_HUB_DISABLE_XET` and still pulls from the blocked Xet CDN, so it downloaded
+the 787-byte block page and failed the size check.
 
-**This is a network policy, not a chart defect, and was not worked around.**
-
-### To finish the last two steps
-
-Any one of these unblocks it:
-
-1. Have the CDN host `us.aws.cdn.hf.co` allow-listed on the network.
-2. Run on a network without the filter.
-3. Pre-seed the weights and skip the download — copy a model into the node and
-   mount it:
-   ```bash
-   minikube ssh -- mkdir -p /data/models
-   minikube cp <local-model-dir> /data/models/
-   # then set decode.extraEnv HF_HUB_OFFLINE=1 and mount /data/models via a
-   # hostPath volume
-   ```
-   The chart does not yet expose `decode.extraVolumes` / `extraVolumeMounts` —
-   that is the one knob this scenario would need added.
-4. Point at an internal mirror: `decode.extraEnv: [{name: HF_ENDPOINT, value: https://<mirror>}]`.
-
-Once weights load, the remaining checks are:
+**7c. Pre-seed the weights** past the filter. A throwaway pod with a *current*
+`huggingface_hub` (which honours `HF_HUB_DISABLE_XET` and reaches the
+un-blocked classic CDN) downloads the model to a node `hostPath`; the decode
+pod then mounts it and runs offline. This is what the new
+`extraVolumes` / `extraVolumeMounts` chart knobs are for.
 
 ```bash
-# prefix-cache index populating from KV events
-kubectl logs -n $NAMESPACE deploy/ppc-epp -c epp | grep -i "kv.*event\|block"
-
-# drive load, then watch the pool grow
-kubectl get hpa -n $NAMESPACE -w
+# seed once (node hostPath /data/hf-models, HF_HOME=/data/hf inside)
+kubectl run hf-seed ... snapshot_download('Qwen/Qwen2.5-0.5B-Instruct')
+# then layer the pre-seed overlay AFTER cpu-vllm.yaml
+helm upgrade ppc-ms ... -f values/modelserver/cpu-preseed.yaml
 ```
 
----
+`values/modelserver/cpu-preseed.yaml` mounts the node dir at `/hf-home`, sets
+`HF_HOME=/hf-home/hf` (note the `hf` subdir the seed's `HF_HOME` created) and
+`HF_HUB_OFFLINE=1`. With that, decode loaded weights in ~60s and went Ready.
 
-## Teardown
+> **Two Helm-list gotchas hit here.** `decode.extraEnv` and `decode.extraVolumes`
+> are lists, and Helm **replaces** lists — it does not merge them. Layering a
+> second `-f` that also sets `extraEnv` silently drops the first set. Keep all
+> `extraEnv` entries in one file. `values/features/network-ca.yaml` documents
+> this and deliberately puts the CA env vars in the CPU overlay instead.
+
+**7d. Fit the CPU worker in memory.** On a 12 GiB node the worker was OOM-ish at
+init (`WorkerProc initialization failed`, exit 1). `VLLM_CPU_KVCACHE_SPACE=1`
+and `--max_model_len=2048` (down from upstream's 32 / 8192) bring total usage
+under the 6 GiB limit.
+
+### What "it works" looked like
+
+```bash
+curl -s -X POST http://<gateway>/v1/completions -d '{
+  "model":"Qwen/Qwen2.5-0.5B-Instruct","prompt":"The capital of France is","max_tokens":10}'
+# HTTP 200
+# {"choices":[{"text":" ______.\nA. Paris\nB. London\n"}], ... }
+```
+
+EPP subscribed to the pod's KV socket:
+
+```
+"logger":"zmq-subscriber","msg":"Connected subscriber socket","endpoint":"tcp://10.244.0.29:5556"
+```
+
+Autoscaler acted on live load (threshold temporarily lowered to 2 to force it
+under a small model's fast completions):
+
+```
+llm_d_epp_request_running{...} 22          # live EPP metric under load
+t=15s | cur= rep=1 desired=2 | decode_pods=2   # HPA raised desiredReplicas, new pod created
+```
+
+The 2nd/3rd replicas stayed `Pending` (a single 12 GiB node has no room for
+another CPU vLLM) — the **scaling decision and pod creation** are the proof, not
+their placement. Restoring `threshold: 16` settles the pool back to 1.
+
+> **Note on the prefix scorer with one pod / short prompts.** The EPP logs
+> `PrefixCacheMatchInfo not found ... assigning score 0`. That is expected here:
+> KV-cache blocks are hashed per 64 tokens, the smoke prompts are shorter than
+> one block, and with a single decode pod there is no second endpoint to score
+> against. Differential prefix routing needs ≥2 pods and prompts spanning
+> multiple blocks — a benchmark, not a smoke test. The integration itself (EPP
+> reading `CacheBlockSize:64 CacheNumBlocks:1365` from the pod, ZMQ subscribed)
+> is proven.
+
+## Teardown## Teardown
 
 ```bash
 helm uninstall ppc-ms ppc ppc-gw -n $NAMESPACE

@@ -79,9 +79,15 @@ spec:
           volumeMounts:
             - name: hf-cache
               mountPath: /tmp/hf
+            {{- with $r.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: hf-cache
           emptyDir: {}
+        {{- with $r.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with $r.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

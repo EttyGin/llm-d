@@ -115,6 +115,10 @@ decode:
       nvidia.com/gpu: 1
   shmSize: 20Gi
   extraEnv: []
+  # Extra volumes / mounts on the decode pod. Use for a custom CA bundle on
+  # TLS-intercepting networks, a pre-seeded model hostPath, etc.
+  extraVolumes: []
+  extraVolumeMounts: []
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -149,6 +153,8 @@ render:
     limits:
       cpu: "4"
       memory: 12Gi
+  extraVolumes: []
+  extraVolumeMounts: []
   annotations: {}
   podLabels: {}
   serviceAnnotations: {}
