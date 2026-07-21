@@ -53,6 +53,9 @@ Pinned to what llm-d **0.8.1** is tested against (`guides/env.sh` and
 > | `experimentalHttpRoute.enabled=true` | `httpRoute.create=true` |
 > | `ghcr.io/llm-d/llm-d-uds-tokenizer:vllm-v0.19.1` | `vllm/vllm-openai-cpu` (`vllm launch render`) |
 
+> **See [RUNBOOK.md](RUNBOOK.md)** for a verified, from-empty-cluster walkthrough
+> with the real errors hit along the way and how each was fixed.
+
 ## Assumptions
 
 * **Istio is already installed** (via OLM / the Sail operator) and provides the
@@ -66,6 +69,7 @@ Pinned to what llm-d **0.8.1** is tested against (`guides/env.sh` and
 ```
 offitial-charts/
 ├── Makefile
+├── RUNBOOK.md                          <- verified end-to-end walkthrough
 ├── scripts/install-crds.sh
 ├── crds/
 │   └── llm-d-router-v0.9.0-crds.yaml   <- vendored, sha256-pinned

@@ -57,11 +57,13 @@ spec:
             # the pod's lifetime.
             - name: HF_HOME
               value: /tmp/hf
+            {{- if .Values.hfTokenSecret.enabled }}
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.hfTokenSecret.name }}
                   key: {{ .Values.hfTokenSecret.key }}
+            {{- end }}
             - name: DO_NOT_TRACK
               value: "1"
           resources:

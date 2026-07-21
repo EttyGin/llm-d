@@ -83,11 +83,13 @@ spec:
               protocol: TCP
             {{- end }}
           env:
+            {{- if .Values.hfTokenSecret.enabled }}
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.hfTokenSecret.name }}
                   key: {{ .Values.hfTokenSecret.key }}
+            {{- end }}
             - name: NAMESPACE
               valueFrom:
                 fieldRef:

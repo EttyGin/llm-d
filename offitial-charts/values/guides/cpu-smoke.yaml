@@ -1,0 +1,28 @@
+## Router side for the CPU smoke run. Layered last.
+eppPlugins:
+  model:
+    name: Qwen/Qwen2.5-0.5B-Instruct
+  flowControl:
+    saturationDetector:
+      type: concurrency-detector
+      parameters:
+        maxConcurrency: 4
+        concurrencyMode: requests
+        headroom: 0.0
+    priorityBands:
+      - priority: 100
+        maxRequests: "32"
+      - priority: 0
+        maxRequests: "16"
+      - priority: -10
+        maxRequests: "4"
+llmd:
+  router:
+    epp:
+      replicas: 1
+      resources:
+        requests:
+          cpu: "300m"
+          memory: 768Mi
+        limits:
+          memory: 2Gi

@@ -23,6 +23,11 @@ accelerator:
   vendor: nvidia
 
 hfTokenSecret:
+  # Set false for public models. A dummy/invalid HF_TOKEN is WORSE than none:
+  # huggingface_hub sends it as `Authorization: Bearer <token>`, the CDN
+  # redirect for the weights blob then never completes, and the pod hangs
+  # forever at "Starting to load model" with a 0-byte .incomplete blob.
+  enabled: true
   name: llm-d-hf-token
   key: HF_TOKEN
 

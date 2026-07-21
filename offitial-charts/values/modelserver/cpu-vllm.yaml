@@ -1,0 +1,95 @@
+## CPU-only vLLM overlay.
+## Port of guides/precise-prefix-cache-routing/modelserver/cpu/vllm/
+##
+## Upstream's CPU overlay is CI-sized for a big node (64 CPU / 64Gi,
+## Llama-3.2-3B-Instruct). This file keeps its *mechanics* verbatim but sizes
+## them for a laptop-scale cluster (minikube, 8 CPU / 12Gi) and swaps in a
+## small public model so no HF token is needed.
+##
+##   helm install ppc-ms charts/llm-d-modelserver \
+##     -f values/modelserver/base.values.yaml \
+##     -f values/modelserver/cpu-vllm.yaml \
+##     -n $NAMESPACE
+
+model:
+  # Public — no gated-repo token required. Upstream uses
+  # meta-llama/Llama-3.2-3B-Instruct, which is gated and too large here.
+  name: Qwen/Qwen2.5-0.5B-Instruct
+  label: Qwen2.5-0.5B-Instruct
+
+accelerator:
+  variant: cpu
+  vendor: intel
+
+# Qwen2.5-0.5B-Instruct is a public repo — no token needed, and injecting an
+# invalid one actively breaks the weights download (see values.yaml).
+hfTokenSecret:
+  enabled: false
+
+decode:
+  replicas: 1
+
+  image:
+    # CPU build of vLLM. Upstream's cpu-vllm component uses
+    # ghcr.io/llm-d/llm-d-cpu:v0.7.0; this is the vLLM project's own CPU image
+    # at the same version as the render sidecar, which keeps tokenizer and
+    # serving on one vLLM release.
+    repository: vllm/vllm-openai-cpu
+    tag: v0.23.0
+    pullPolicy: IfNotPresent
+
+  tensorParallelSize: 1
+
+  kvEvents:
+    enabled: true
+    port: 5556
+    # Must equal eppPlugins.precisePrefixCache.blockSize on the router.
+    blockSize: 64
+
+  extraArgs:
+    # Both required on the CPU backend by upstream's overlay.
+    - "--disable-hybrid-kv-cache-manager"
+    - "--max_model_len=8192"
+    # Precise prefix cache routing is meaningless without the prefix cache.
+    - "--enable-prefix-caching"
+
+  extraEnv:
+    # KV cache size in GiB. Upstream uses 32; sized down to fit the node.
+    - name: VLLM_CPU_KVCACHE_SPACE
+      value: "4"
+    - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+      value: "1"
+
+  securityContext:
+    # Verbatim from upstream's CPU overlay — the CPU backend pins threads.
+    seccompProfile:
+      type: Unconfined
+    capabilities:
+      add:
+        - SYS_NICE
+
+  resources:
+    requests:
+      cpu: "2"
+      memory: 3Gi
+      # CRITICAL: Helm MERGES maps, it does not replace them. The chart's
+      # default resources carry `nvidia.com/gpu: 1`, which survives into this
+      # overlay unless explicitly nulled — the pod then stays Pending forever
+      # with "Insufficient nvidia.com/gpu" on a CPU-only cluster.
+      nvidia.com/gpu: null
+    limits:
+      cpu: "3"
+      memory: 5Gi
+      nvidia.com/gpu: null
+
+  shmSize: 2Gi
+
+render:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "250m"
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 3Gi

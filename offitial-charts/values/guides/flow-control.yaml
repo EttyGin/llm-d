@@ -61,14 +61,15 @@ llmd:
       - name: best-effort-traffic
         priority: -10
 
-    # Flow control exposes queue-depth metrics on 9090
-    # (llm_d_epp_flow_control_queue_size).
-    extraServicePorts:
-      - name: http
-        port: 80
-        protocol: TCP
-        targetPort: 8081
-      - name: metrics
-        port: 9090
-        protocol: TCP
-        targetPort: 9090
+    # NOTE: upstream's guides/flow-control/router/flow-control.values.yaml adds
+    # a `metrics` port 9090 here. Do NOT copy that — router chart v0.9.0's
+    # _service.yaml already emits `http-metrics` on 9090 unconditionally, so
+    # adding it again makes the Service invalid:
+    #
+    #   Service "<release>-epp" is invalid: spec.ports[3]: Duplicate value:
+    #   {"Protocol":"TCP","Port":9090,...}
+    #
+    # Flow control's llm_d_epp_flow_control_queue_size is served on that
+    # existing port; nothing extra is needed. The `http` port 80 below is
+    # already contributed by the precise-prefix-cache-routing overlay, so this
+    # file adds no service ports at all.
