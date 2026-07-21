@@ -9,8 +9,7 @@ guide's own `helm install` command:
 ```bash
 helm install ppc charts/llm-d-router \
   -f values/base.values.yaml \
-  -f values/guides/precise-prefix-cache-routing.yaml \
-  -f values/guides/flow-control.yaml \
+  -f values/guides/precise-prefix-cache-flowcontrol.yaml \
   -f values/features/httproute-flags.yaml \
   -n $NAMESPACE
 ```
@@ -88,9 +87,10 @@ offitial-charts/
 ├── values/                              <- mirrors the upstream guide layout
 │   ├── base.values.yaml                 <- recipes/router/base.values.yaml
 │   ├── guides/
-│   │   ├── precise-prefix-cache-routing.yaml
-│   │   ├── flow-control.yaml
-│   │   └── smoke-test.yaml              (not upstream)
+│   │   ├── precise-prefix-cache-routing.yaml       (precise only)
+│   │   ├── precise-prefix-cache-flowcontrol.yaml   (precise + flow control)
+│   │   ├── flow-control.yaml                       (standalone flow control)
+│   │   └── cpu-smoke.yaml              (not upstream; small self-contained)
 │   ├── features/
 │   │   ├── autoscaling-keda.yaml
 │   │   ├── httproute-flags.yaml
@@ -108,7 +108,7 @@ offitial-charts/
     ├── llm-d-router/
     │   ├── Chart.yaml                   <- OCI dep: llm-d-router-gateway v0.9.0
     │   ├── charts/*.tgz                 <- pulled by `make deps`, unmodified
-    │   └── templates/epp-plugins-configmap.yaml
+    │   └── values.yaml                  <- pure passthrough; NO templates of its own
     └── llm-d-modelserver/
 ```
 
@@ -144,8 +144,7 @@ helm install ppc-gw charts/llm-d-gateway \
 
 helm install ppc charts/llm-d-router \
   -f values/base.values.yaml \
-  -f values/guides/precise-prefix-cache-routing.yaml \
-  -f values/guides/flow-control.yaml \
+  -f values/guides/precise-prefix-cache-flowcontrol.yaml \
   -f values/features/httproute-flags.yaml \
   -n $NAMESPACE
 
@@ -162,14 +161,18 @@ Service `<guideLabel>-render`. Both resolve to
 `precise-prefix-cache-routing-render` — identical to what upstream's Kustomize
 `namePrefix` produces.
 
-### Stacking guide overlays
+### One config file per topology (no cross-file merge)
 
-`precise-prefix-cache-routing.yaml` and `flow-control.yaml` compose. **Upstream
-cannot do this**: its EPP config is an opaque YAML *string* under
-`epp.pluginsCustomConfig`, so a second `-f` replaces the first wholesale. This
-chart models the config as structured values under `eppPlugins`, so Helm
-deep-merges the overlays and you get precise prefix-cache routing *and* flow
-control in one config.
+The EPP reads a **single** config file (`pluginsConfigFile` selects it), so
+precise-prefix and flow-control cannot be layered as two `-f` files — the same
+constraint upstream has. Pick one guide file:
+
+| File | What |
+|---|---|
+| `precise-prefix-cache-routing.yaml` | precise prefix routing only |
+| `precise-prefix-cache-flowcontrol.yaml` | precise prefix routing **+** flow control (one combined config) |
+| `flow-control.yaml` | standalone flow control (generic prefix scorer, no KV events) |
+| `cpu-smoke.yaml` | small self-contained combined config for minikube |
 
 ## Values that must agree across charts
 
@@ -362,8 +365,7 @@ helm upgrade --install ppc-gw charts/llm-d-gateway -n $NS \
 # Router: EPP (HA, 2 replicas) + tokenizer sidecar + flow control
 helm upgrade --install ppc charts/llm-d-router -n $NS \
   -f values/base.values.yaml \
-  -f values/guides/precise-prefix-cache-routing.yaml \
-  -f values/guides/flow-control.yaml \
+  -f values/guides/precise-prefix-cache-flowcontrol.yaml \
   -f values/features/httproute-flags.yaml \
   -f values/features/tokenizer-sidecar.yaml
 
@@ -423,44 +425,27 @@ make install ... SIDECAR=1
 That profile also pins the sidecar image to `v0.23.0` — the chart's own default
 is `v0.19.1`, older than the render Deployment upstream actually uses.
 
-## How the templated config is wired
+## How the EPP config is supplied
 
-The upstream chart accepts the `EndpointPickerConfig` only as a pre-rendered
-YAML **string** under `router.epp.pluginsCustomConfig`, and Helm cannot template
-a subchart's values — so the string cannot be parameterized from here.
+This chart adds **no templates of its own** — it is a pure dependency wrapper.
+The EPP configuration is provided the upstream way, through the official
+subchart's `router.epp.pluginsCustomConfig` (a map of `filename: <raw config>`)
+with `router.epp.pluginsConfigFile` selecting which file is active. The subchart
+mounts that ConfigMap and points the EPP `--config-file` at it.
 
-Instead this chart renders its own ConfigMap (`llm-d-epp-plugins`) from
-`.Values.eppPlugins` and points the EPP at it through the subchart's public
-`volumes` / `volumeMounts` / `pluginsConfigFile` hooks:
+Everything under `llmd:` in these values is passed straight through to
+`oci://ghcr.io/llm-d/charts/llm-d-router-gateway`, so the value hierarchy is
+**identical to that chart's own** (and to the upstream guide values files),
+nested one level under the `llmd` dependency alias. Updating to a new release is
+therefore a copy-paste: take the upstream guide's `router:` block, drop it under
+`llmd:`. The `.tgz` in `charts/llm-d-router/charts/` is the unmodified upstream
+chart.
 
-```yaml
-llmd:
-  router:
-    epp:
-      # The upstream chart hardcodes "--config-file /config/<pluginsConfigFile>"
-      # and mounts its own ConfigMap at /config. ".." escapes that prefix.
-      pluginsConfigFile: "../llmd-plugins/plugins.yaml"
-      volumeMounts:
-        - { name: llmd-plugins, mountPath: /llmd-plugins, readOnly: true }
-      volumes:
-        - { name: llmd-plugins, configMap: { name: llm-d-epp-plugins } }
-```
-
-Nothing in the subchart is modified — it is the unmodified upstream `.tgz` in
-`charts/llm-d-router/charts/`. Set `eppPlugins.enabled: false` and
-`pluginsConfigFile: "default-plugins.yaml"` to fall back to stock behavior.
-
-> The `..` in the path is deliberate and load-bearing: `/config` is already
-> occupied by the subchart's own ConfigMap mount, so the generated config has
-> to live elsewhere and be reached relatively.
-
-### Two value namespaces
-
-| Prefix | Goes to |
-|---|---|
-| `eppPlugins.*` | this chart — generates the EndpointPickerConfig |
-| `llmd.*` | the upstream subchart verbatim (its `router:` / `provider:` / `httpRoute:` nested one level deeper) |
-
+> Earlier revisions of this wrapper generated the config from a structured
+> `eppPlugins.*` block via a custom template. That was removed — it drifted from
+> upstream and made version bumps harder. The config is now raw YAML matching
+> upstream exactly. Field-level knobs (e.g. `speculativeIndexing`) are edited
+> directly in the config string.
 
 ## Provenance
 
@@ -483,7 +468,6 @@ Nothing in the subchart is modified — it is the unmodified upstream `.tgz` in
 |---|---|
 | Decode/EPP resources are named `<release>-decode` / `<release>-epp` instead of Kustomize's `precise-prefix-cache-routing-gpu-vllm-*` | Helm release-scoped naming. The **render Service keeps the upstream name** because the router resolves it by guide label |
 | PodMonitor selector includes the full decode label set, not just `llm-d.ai/role: decode` | Upstream adds guide labels via a Kustomize `commonLabels` configuration; the chart applies them directly. Stricter, same effect |
-| The EPP config comes from a separately-mounted ConfigMap | See [How the templated config is wired](#how-the-templated-config-is-wired). The subchart itself is unmodified |
 
 ### Not from upstream
 

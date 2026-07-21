@@ -175,11 +175,9 @@ helm upgrade --install ppc-gw charts/llm-d-gateway -n $NAMESPACE \
 # Router (EPP + InferencePool + HTTPRoute + InferenceObjectives)
 helm upgrade --install ppc charts/llm-d-router -n $NAMESPACE \
   -f values/base.values.yaml \
-  -f values/guides/precise-prefix-cache-routing.yaml \
-  -f values/guides/flow-control.yaml \
+  -f values/guides/cpu-smoke.yaml \
   -f values/features/httproute-flags.yaml \
-  -f values/features/monitoring.values.yaml \
-  -f values/guides/cpu-smoke.yaml
+  -f values/features/monitoring.values.yaml
 
 # Model servers + render + ScaledObject
 helm upgrade --install ppc-ms charts/llm-d-modelserver -n $NAMESPACE \

@@ -1,93 +1,29 @@
 # llm-d Router — chart defaults.
 #
-# This chart is a thin wrapper over the OFFICIAL llm-d chart:
+# This chart is a THIN WRAPPER over the official llm-d chart:
 #   oci://ghcr.io/llm-d/charts/llm-d-router-gateway  (see Chart.yaml)
 #
-# To move to a new upstream release: bump `version` in Chart.yaml, then
-#   helm dependency update charts/llm-d-router
+# It adds NO templates of its own. Everything under `llmd:` is passed straight
+# through to the official subchart, so these values mirror the upstream chart's
+# own value hierarchy exactly — just nested one level under `llmd:` (the
+# dependency alias). The EPP configuration is supplied the upstream way, via
+# `llmd.router.epp.pluginsCustomConfig`, identical in shape to the values files
+# under guides/<path>/router/*.values.yaml in the llm-d repo.
 #
-# Two value namespaces:
-#   eppPlugins.*  — this chart's own. Generates the EndpointPickerConfig.
-#   llmd.*        — passed through to the upstream subchart verbatim. Anything
-#                   the upstream chart documents under `router:` / `provider:` /
-#                   `httpRoute:` goes here, nested one level deeper.
+# To move to a new upstream release: bump `version` in Chart.yaml, `make deps`.
+# To update a guide config: copy the upstream guide's `router:` block into the
+# matching file under values/guides/, nested under `llmd:`.
 #
 # Real configuration comes from the layered values tree:
 #   helm install ppc charts/llm-d-router \
 #     -f values/base.values.yaml \
 #     -f values/guides/precise-prefix-cache-routing.yaml \
-#     -f values/guides/flow-control.yaml \
 #     -f values/features/httproute-flags.yaml \
 #     -n $NAMESPACE
 
 # ---------------------------------------------------------------------------
-# Templated EndpointPickerConfig.
-#
-# NOT a Kubernetes CRD — `llm-d.ai/v1alpha1` is the EPP binary's config file
-# format, mounted from a ConfigMap and read once at startup (--config-file).
-# Changing it requires an EPP restart; nothing reconciles it.
-#
-# Off by default: bare, this chart behaves like the stock upstream chart.
-# ---------------------------------------------------------------------------
-eppPlugins:
-  enabled: false
-
-  # Fixed ConfigMap name. The subchart mounts it via llmd.router.epp.volumes
-  # below, and Helm cannot template subchart values — so if you change this,
-  # change it in BOTH places.
-  configMapName: llm-d-epp-plugins
-  fileName: plugins.yaml
-
-  model:
-    name: ""
-
-  tokenizer:
-    # Empty => http://<llm-d.ai/guide label>-render:8000
-    url: ""
-
-  precisePrefixCache:
-    enabled: true
-    blockSize: 64
-    # Predicts cache entries right after routing to keep back-to-back
-    # same-prefix requests sticky before the confirming KVEvent arrives (2s TTL).
-    # Recommended true in production. Set false to disable — e.g. if a bug in
-    # your router build mis-speculates and breaks affinity; correctness then
-    # relies only on confirmed events. This IS honoured when set to false.
-    speculativeIndexing: true
-    enableMetrics: true
-    kvEvents:
-      topicFilter: "kv@"
-      concurrency: 8
-      discoverPods: true
-      socketPort: 5556
-
-  scoring:
-    weights:
-      kvCacheUtilization: 2.0
-      queue: 2.0
-      prefixCache: 3.0
-      noHitLru: 2.0
-
-  flowControl:
-    enabled: false
-    maxBytes: "10Gi"
-    maxRequests: "1k"
-    defaultRequestTTL: "60s"
-    saturationDetector:
-      type: concurrency-detector
-      parameters:
-        maxConcurrency: 132
-        concurrencyMode: requests
-        headroom: 0.0
-    fairnessPolicy: round-robin-fairness-policy
-    orderingPolicy: fcfs-ordering-policy
-    priorityBands: []
-
-  extraPlugins: []
-  extraSchedulingPlugins: []
-
-# ---------------------------------------------------------------------------
-# Passed through to oci://ghcr.io/llm-d/charts/llm-d-router-gateway
+# Passed through verbatim to oci://ghcr.io/llm-d/charts/llm-d-router-gateway.
+# Keys and nesting match that chart's own values.yaml.
 # ---------------------------------------------------------------------------
 llmd:
   provider:
@@ -110,8 +46,8 @@ llmd:
       protocol: http
       targetPorts:
         - number: 8000
-      # Placeholder so the chart renders standalone. The guide overlay is
-      # authoritative. Also determines the render Service URL.
+      # Placeholder so the chart renders standalone; the guide overlay is
+      # authoritative.
       matchLabels:
         llm-d.ai/guide: "precise-prefix-cache-routing"
 
@@ -130,22 +66,10 @@ llmd:
 
       replicas: 1
 
-      # The upstream chart hardcodes the config path as "/config/<file>" and
-      # mounts its own ConfigMap at /config. To use OUR generated ConfigMap
-      # instead, mount it at /llmd-plugins and escape /config with "..".
-      # Set to "default-plugins.yaml" to fall back to the upstream config.
-      pluginsConfigFile: "../llmd-plugins/plugins.yaml"
+      # Stock upstream default. A guide overlay selects its own config file and
+      # supplies it under pluginsCustomConfig (the upstream mechanism).
+      pluginsConfigFile: "default-plugins.yaml"
       pluginsCustomConfig: {}
-
-      volumeMounts:
-        - name: llmd-plugins
-          mountPath: /llmd-plugins
-          readOnly: true
-      volumes:
-        - name: llmd-plugins
-          configMap:
-            # Must equal eppPlugins.configMapName above.
-            name: llm-d-epp-plugins
 
     tokenizer:
       enabled: false

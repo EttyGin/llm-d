@@ -1,58 +1,66 @@
-## flow-control guide overrides for the router.
-## Port of guides/flow-control/router/flow-control.values.yaml + objectives.yaml
+## Flow Control (standalone) — router values.
+##
+## Mirrors guides/flow-control/router/flow-control.values.yaml + objectives.yaml,
+## nested under `llmd:`. This is the NON-precise flow-control guide (generic
+## prefix-cache-scorer, no KV-events producer). For precise prefix routing WITH
+## flow control, use values/guides/precise-prefix-cache-flowcontrol.yaml instead.
 ##
 ## Layer on top of: values/base.values.yaml
-## Composes with:   values/guides/precise-prefix-cache-routing.yaml
 ##
-## NOTE: upstream cannot stack these two guides. Its EPP config is an opaque
-## YAML *string* under `epp.pluginsCustomConfig`, so a second -f replaces the
-## first wholesale (last-wins) rather than merging. Because this chart models
-## the config as structured values under `eppPlugins`, Helm deep-merges the two
-## overlays and you get precise prefix-cache routing *and* flow control.
-##
-## This file deliberately does NOT set `modelServers.matchLabels` — flow control
-## is a capability layer, not a separate deployment, so it inherits whichever
-## guide label the overlay beneath it established.
-
-eppPlugins:
-  flowControl:
-    # Emits `featureGates: [flowControl]` in the EndpointPickerConfig.
-    enabled: true
-    maxBytes: "10Gi"
-    maxRequests: "1k"
-    defaultRequestTTL: "60s"
-
-    # The system default is `utilization-detector`. Production deployments
-    # should use `concurrency-detector` to avoid telemetry lag — see
-    # guides/flow-control/tuning.md.
-    #
-    # maxConcurrency must be calibrated for your fleet: roughly
-    # (model server replicas x per-replica max concurrent requests).
-    # 132 is upstream's value for 8 replicas of Qwen3-32B on 16xH100.
-    saturationDetector:
-      type: concurrency-detector
-      parameters:
-        maxConcurrency: 132
-        concurrencyMode: requests
-        headroom: 0.0
-
-    fairnessPolicy: round-robin-fairness-policy
-    orderingPolicy: fcfs-ordering-policy
-
-    priorityBands:
-      - priority: 100
-        maxRequests: "500"
-      - priority: 0
-        maxRequests: "200"
-      - priority: -10
-        maxRequests: "50"
+## Difference from upstream: the upstream file adds a `metrics` port on 9090 in
+## extraServicePorts. Router chart v0.9.0 already exposes http-metrics on 9090
+## unconditionally, so adding it again makes the Service invalid — omitted here.
 
 llmd:
   router:
-    # Rendered as InferenceObjective resources (llm-d.ai/v1alpha2 — a real CRD,
-    # installed by scripts/install-crds.sh). Priorities MUST line up with the
-    # priorityBands above; clients select one via the
-    # `x-llm-d-inference-objective` header.
+    epp:
+      pluginsConfigFile: "custom-plugins.yaml"
+      pluginsCustomConfig:
+        custom-plugins.yaml: |
+          apiVersion: llm-d.ai/v1alpha1
+          kind: EndpointPickerConfig
+          featureGates:
+          - flowControl
+          plugins:
+          - type: queue-scorer
+          - type: kv-cache-utilization-scorer
+          - type: prefix-cache-scorer
+          - type: round-robin-fairness-policy
+          - type: fcfs-ordering-policy
+          - type: concurrency-detector
+            parameters:
+              maxConcurrency: 132
+              concurrencyMode: requests
+              headroom: 0.0
+          schedulingProfiles:
+          - name: default
+            plugins:
+            - pluginRef: queue-scorer
+              weight: 2
+            - pluginRef: kv-cache-utilization-scorer
+              weight: 2
+            - pluginRef: prefix-cache-scorer
+              weight: 3
+          flowControl:
+            maxBytes: "10Gi"
+            maxRequests: "1k"
+            defaultRequestTTL: "60s"
+            saturationDetector:
+              pluginRef: concurrency-detector
+            priorityBands:
+            - priority: 100
+              maxRequests: "500"
+              fairnessPolicyRef: round-robin-fairness-policy
+              orderingPolicyRef: fcfs-ordering-policy
+            - priority: 0
+              maxRequests: "200"
+              fairnessPolicyRef: round-robin-fairness-policy
+              orderingPolicyRef: fcfs-ordering-policy
+            - priority: -10
+              maxRequests: "50"
+              fairnessPolicyRef: round-robin-fairness-policy
+              orderingPolicyRef: fcfs-ordering-policy
+
     inferenceObjectives:
       - name: premium-traffic
         priority: 100
@@ -61,15 +69,6 @@ llmd:
       - name: best-effort-traffic
         priority: -10
 
-    # NOTE: upstream's guides/flow-control/router/flow-control.values.yaml adds
-    # a `metrics` port 9090 here. Do NOT copy that — router chart v0.9.0's
-    # _service.yaml already emits `http-metrics` on 9090 unconditionally, so
-    # adding it again makes the Service invalid:
-    #
-    #   Service "<release>-epp" is invalid: spec.ports[3]: Duplicate value:
-    #   {"Protocol":"TCP","Port":9090,...}
-    #
-    # Flow control's llm_d_epp_flow_control_queue_size is served on that
-    # existing port; nothing extra is needed. The `http` port 80 below is
-    # already contributed by the precise-prefix-cache-routing overlay, so this
-    # file adds no service ports at all.
+    modelServers:
+      matchLabels:
+        llm-d.ai/guide: "flow-control"

@@ -21,8 +21,7 @@ HELM := helm --namespace $(NAMESPACE)
 # --- values layering -------------------------------------------------------
 ROUTER_VALUES := \
   -f values/base.values.yaml \
-  -f values/guides/precise-prefix-cache-routing.yaml \
-  -f values/guides/flow-control.yaml \
+  -f values/guides/precise-prefix-cache-flowcontrol.yaml \
   -f values/features/httproute-flags.yaml
 
 MS_VALUES := \
@@ -43,9 +42,12 @@ MS_VALUES     += -f values/features/monitoring.values.yaml \
                  --set autoscaling.keda.eppServiceName=$(RELEASE)-epp
 endif
 
-# Layered last so they win.
+# Smoke swaps the whole guide config (raw EPP config can't be field-patched).
 ifdef SMOKE
-ROUTER_VALUES += -f values/guides/smoke-test.yaml
+ROUTER_VALUES := \
+  -f values/base.values.yaml \
+  -f values/guides/cpu-smoke.yaml \
+  -f values/features/httproute-flags.yaml
 MS_VALUES     += -f values/modelserver/smoke-test.yaml
 endif
 
