@@ -256,6 +256,50 @@ carries a complete `patch-vllm.yaml`. Pick one:
 | `values/modelserver/cpu-vllm.yaml` | CPU, download at startup |
 | `values/modelserver/cpu-preseed.yaml` | CPU, weights from a node hostPath (offline) |
 
+### Adding things without restating the spec (additive knobs)
+
+You do **not** have to copy the whole `decode.spec` to add one thing. Layer a
+separate `-f` file with these knobs — they merge onto the base spec:
+
+```yaml
+serviceAccount:
+  create: false
+  name: my-existing-sa          # bind an existing ServiceAccount
+
+decode:
+  deploymentAnnotations:        # -> Deployment metadata.annotations
+    my.org/owner: team-inference
+  podAnnotations:               # -> pod template annotations
+    sidecar.istio.io/inject: "false"
+  podLabels: {}                 # -> pod template labels
+
+  extraArgs:                    # -> appended to the modelserver container args
+    - --max-model-len=32768
+    - --gpu-memory-utilization=0.92
+  extraEnv:                     # -> appended to its env
+    - { name: MY_FLAG, value: "on" }
+
+  containerSecurityContext:     # -> set on the container (run as root, caps, …)
+    runAsUser: 0
+    runAsNonRoot: false
+  podSecurityContext:           # -> pod-level securityContext
+    fsGroup: 0
+  imagePullSecrets:
+    - { name: my-registry-creds }
+
+  # Connect an existing PVC (chart never creates one):
+  extraVolumes:
+    - name: model-cache
+      persistentVolumeClaim: { claimName: my-model-pvc }
+  extraVolumeMounts:
+    - { name: model-cache, mountPath: /model-cache, readOnly: true }
+```
+
+`extraArgs` / `extraEnv` / `extraVolumeMounts` / `containerSecurityContext`
+target the container named `decode.containerName` (default `modelserver`).
+Everything here is optional and empty by default. Anything not covered by a knob
+you still edit directly in `decode.spec` — it is a normal Deployment spec.
+
 Chart-owned, structured (separate resources, not part of the pod spec):
 `serviceAccount.*`, `render.*`, `monitoring.podMonitor.*`, `autoscaling.keda.*`,
 and the `model.label` / `guideLabel` / `accelerator.*` labels.

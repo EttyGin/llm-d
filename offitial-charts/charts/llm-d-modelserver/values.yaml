@@ -54,6 +54,23 @@ hfTokenSecret:
 # ---------------------------------------------------------------------------
 decode:
   enabled: true
+
+  # ---- Additive knobs: merged onto decode.spec below WITHOUT restating it ----
+  # Layer these from a separate -f file to customize the base overlay.
+  # Which container in decode.spec the extra* below target:
+  containerName: modelserver
+  extraArgs: []            # appended to that container's args
+  extraEnv: []             # appended to that container's env
+  extraVolumeMounts: []    # appended to that container's volumeMounts
+  extraVolumes: []         # appended to the pod's volumes
+  podLabels: {}            # added to the pod template labels
+  podAnnotations: {}       # added to the pod template annotations
+  deploymentAnnotations: {} # added to the Deployment's annotations
+  containerSecurityContext: {} # sets securityContext on the target container
+  podSecurityContext: {}       # sets pod-level securityContext
+  imagePullSecrets: []         # sets pod imagePullSecrets
+
+  # ---- The verbatim patch (== patch-vllm.yaml `spec:`) ----
   spec:
     replicas: 1
     # strategy: {}                 # optional, e.g. Recreate
