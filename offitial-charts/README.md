@@ -35,6 +35,18 @@ Pinned to what llm-d **0.8.1** is tested against (`guides/env.sh` and
 | llm-d router CRDs | `v0.9.0` | `InferenceObjective` + `InferenceModelRewrite` (`llm-d.ai/v1alpha2`) — vendored in `crds/` |
 | vLLM | `v0.23.0` | serving + `vllm-openai-cpu` render image |
 
+### NVIDIA GPU image choice
+
+The `precise-prefix-cache-routing` guide's `gpu-vllm` component defaults to the
+**upstream** `vllm/vllm-openai:v0.23.0` (what `values/modelserver/gpu-vllm.yaml`
+uses). llm-d also ships its **own** NVIDIA build, `ghcr.io/llm-d/llm-d-cuda`
+(RHEL UBI9, release-matched, with patches not yet upstream + the KV offloading
+connector) — use `values/modelserver/gpu-cuda.yaml` for it. Prefer `llm-d-cuda`
+on OpenShift/enterprise, for tiered-cache offloading, or when you want the
+llm-d-supported image; `vllm/vllm-openai` is the plain upstream default. See
+`docs/api-reference/artifacts.md` → *Custom Images* (also `-gb200`, `-aws`
+variants).
+
 > ### Note on older guide text
 > If you are following a guide that mentions `guides/recipes/scheduler/`, the
 > GAIE `standalone`/`inferencepool` charts, `experimentalHttpRoute.enabled`, or

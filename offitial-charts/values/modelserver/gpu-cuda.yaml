@@ -1,0 +1,50 @@
+## NVIDIA GPU with llm-d's OWN vLLM build (llm-d-cuda), instead of the upstream
+## vllm/vllm-openai image that gpu-vllm.yaml uses.
+##
+##   helm install ppc-ms charts/llm-d-modelserver \
+##     -f values/modelserver/base.values.yaml \
+##     -f values/modelserver/gpu-cuda.yaml \
+##     -n $NAMESPACE
+##
+## Why choose this over gpu-vllm.yaml:
+##   - RHEL UBI9 base — the supported image on OpenShift / enterprise clusters.
+##   - Carries llm-d patches not yet upstream (per docker/common-versions:
+##     a DP-supervisor fix on top of vLLM v0.23.0, the KV offloading connector
+##     needed by the tiered-prefix-cache path, CUDA 13.0.2).
+##   - It is the llm-d-release-matched, llm-d-supported NVIDIA image.
+##
+## Same serving config as gpu-vllm.yaml (8 replicas x TP2, Qwen3-32B) — only the
+## image differs. See docs/api-reference/artifacts.md "Custom Images". For the
+## specialised variants use the matching repository:
+##   ghcr.io/llm-d/llm-d-cuda-gb200   (GB200 / DeepEP)
+##   ghcr.io/llm-d/llm-d-aws          (NVIDIA + EFA / AWS HPC networking)
+
+model:
+  name: Qwen/Qwen3-32B
+  label: Qwen3-32B
+
+accelerator:
+  variant: gpu
+  vendor: nvidia
+
+decode:
+  engine: vllm
+  replicas: 8
+  tensorParallelSize: 2
+  image:
+    repository: ghcr.io/llm-d/llm-d-cuda
+    # Matches the llm-d 0.8.1 release. artifacts.md still lists v0.7.0; confirm
+    # the exact tag you want against
+    #   https://github.com/llm-d/llm-d/pkgs/container/llm-d-cuda
+    tag: v0.8.1
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "8"
+      memory: 96Gi
+      nvidia.com/gpu: 2
+    limits:
+      cpu: "16"
+      memory: 128Gi
+      nvidia.com/gpu: 2
+  shmSize: 20Gi
