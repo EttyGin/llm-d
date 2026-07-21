@@ -1,19 +1,10 @@
-## CPU-only vLLM overlay.
-## Port of guides/precise-prefix-cache-routing/modelserver/cpu/vllm/
-##
-## Upstream's CPU overlay is CI-sized for a big node (64 CPU / 64Gi,
-## Llama-3.2-3B-Instruct). This file keeps its *mechanics* verbatim but sizes
-## them for a laptop-scale cluster (minikube, 8 CPU / 12Gi) and swaps in a
-## small public model so no HF token is needed.
-##
-##   helm install ppc-ms charts/llm-d-modelserver \
-##     -f values/modelserver/base.values.yaml \
-##     -f values/modelserver/cpu-vllm.yaml \
-##     -n $NAMESPACE
+## CPU-only, weights DOWNLOADED at startup. Full decode.spec (a complete patch),
+## self-contained — use INSTEAD of gpu-vllm.yaml. NOT upstream sizing.
+## On a network that blocks the HF Xet CDN, prefer cpu-preseed.yaml instead;
+## HF_HUB_DISABLE_XET + a trusted CA (values/features/network-ca.yaml) may not
+## suffice if the in-image huggingface_hub ignores the flag.
 
 model:
-  # Public — no gated-repo token required. Upstream uses
-  # meta-llama/Llama-3.2-3B-Instruct, which is gated and too large here.
   name: Qwen/Qwen2.5-0.5B-Instruct
   label: Qwen2.5-0.5B-Instruct
 
@@ -21,98 +12,99 @@ accelerator:
   variant: cpu
   vendor: intel
 
-# Qwen2.5-0.5B-Instruct is a public repo — no token needed, and injecting an
-# invalid one actively breaks the weights download (see values.yaml).
 hfTokenSecret:
-  enabled: false
+  enabled: false          # public model + offline; render also needs this off
 
 decode:
-  replicas: 1
-
-  image:
-    # CPU build of vLLM. Upstream's cpu-vllm component uses
-    # ghcr.io/llm-d/llm-d-cpu:v0.7.0; this is the vLLM project's own CPU image
-    # at the same version as the render sidecar, which keeps tokenizer and
-    # serving on one vLLM release.
-    repository: vllm/vllm-openai-cpu
-    tag: v0.23.0
-    pullPolicy: IfNotPresent
-
-  tensorParallelSize: 1
-
-  kvEvents:
-    enabled: true
-    port: 5556
-    # Must equal eppPlugins.precisePrefixCache.blockSize on the router.
-    blockSize: 64
-
-  extraArgs:
-    # Both required on the CPU backend by upstream's overlay.
-    - "--disable-hybrid-kv-cache-manager"
-    # 2048 (not upstream's 8192) to keep total memory under the cgroup limit on
-    # a laptop-scale node — an 8192 context needs a bigger KV allocation than
-    # the 5Gi limit below allows, and the CPU worker gets OOM-killed at init.
-    - "--max_model_len=2048"
-    # Precise prefix cache routing is meaningless without the prefix cache.
-    - "--enable-prefix-caching"
-
-  extraEnv:
-    # KV cache size in GiB. Upstream uses 32; 1 here so model (~1Gi bf16) +
-    # KV + torch overhead fit inside the 5Gi limit. Raising this OOM-kills the
-    # CPU worker during engine init (exit 1, "WorkerProc initialization failed").
-    - name: VLLM_CPU_KVCACHE_SPACE
-      value: "1"
-    - name: VLLM_CPU_NUM_OF_RESERVED_CPU
-      value: "1"
-    # Route weight downloads through the classic HF LFS CDN instead of the
-    # newer Xet bridge (us.aws.cdn.hf.co). Required on networks whose content
-    # filter blocks the Xet CDN — without it the download stalls at a 0-byte
-    # .incomplete blob. Verified: with this set, a 988MB safetensors pulled in
-    # ~13s on a network where the Xet CDN returned a block page.
-    - name: HF_HUB_DISABLE_XET
-      value: "1"
-    # Trust the network's TLS-interception CA (mounted by
-    # values/features/network-ca.yaml). Without this, the httpx-based weight
-    # download fails with CERTIFICATE_VERIFY_FAILED on a MITM'd network.
-    # Harmless if the mount is absent (the file just won't exist and clients
-    # fall back to the system bundle only for the missing path).
-    - name: SSL_CERT_FILE
-      value: /etc/ssl/network-ca/ca-bundle.crt
-    - name: REQUESTS_CA_BUNDLE
-      value: /etc/ssl/network-ca/ca-bundle.crt
-    - name: CURL_CA_BUNDLE
-      value: /etc/ssl/network-ca/ca-bundle.crt
-
-  securityContext:
-    # Verbatim from upstream's CPU overlay — the CPU backend pins threads.
-    seccompProfile:
-      type: Unconfined
-    capabilities:
-      add:
-        - SYS_NICE
-
-  resources:
-    requests:
-      cpu: "2"
-      memory: 3Gi
-      # CRITICAL: Helm MERGES maps, it does not replace them. The chart's
-      # default resources carry `nvidia.com/gpu: 1`, which survives into this
-      # overlay unless explicitly nulled — the pod then stays Pending forever
-      # with "Insufficient nvidia.com/gpu" on a CPU-only cluster.
-      nvidia.com/gpu: null
-    limits:
-      cpu: "3"
-      memory: 6Gi
-      nvidia.com/gpu: null
-
-  shmSize: 2Gi
+  enabled: true
+  spec:
+    replicas: 1
+    template:
+      spec:
+        containers:
+          - name: modelserver
+            image: vllm/vllm-openai-cpu:v0.23.0
+            imagePullPolicy: IfNotPresent
+            command: ["vllm", "serve"]
+            args:
+              - Qwen/Qwen2.5-0.5B-Instruct
+              - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+              - --disable-hybrid-kv-cache-manager        # required on CPU backend
+              - --max_model_len=2048
+              - --block-size=64
+              - --enable-prefix-caching
+              - --kv-events-config
+              - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@Qwen/Qwen2.5-0.5B-Instruct"}'
+            ports:
+              - containerPort: 5556
+                name: kv-events
+                protocol: TCP
+              - containerPort: 8000
+                name: modelserver
+                protocol: TCP
+            env:
+              - name: NAMESPACE
+                valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+              - name: POD_IP
+                valueFrom: { fieldRef: { fieldPath: status.podIP } }
+              - name: POD_PORT
+                value: "8000"
+              - name: KV_EVENTS_ENDPOINT
+                value: "tcp://*:5556"
+              - name: DO_NOT_TRACK
+                value: "1"
+              - name: VLLM_CPU_KVCACHE_SPACE
+                value: "1"
+              - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+                value: "1"
+              # Route weights through the classic HF CDN, not the Xet bridge.
+              - name: HF_HUB_DISABLE_XET
+                value: "1"
+            securityContext:                              # CPU backend pins threads
+              seccompProfile:
+                type: Unconfined
+              capabilities:
+                add: ["SYS_NICE"]
+            resources:
+              requests:
+                cpu: "2"
+                memory: 3Gi
+              limits:
+                cpu: "3"
+                memory: 6Gi
+            startupProbe:
+              initialDelaySeconds: 15
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 120
+              httpGet: { path: /v1/models, port: modelserver }
+            livenessProbe:
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+              httpGet: { path: /health, port: modelserver }
+            readinessProbe:
+              periodSeconds: 5
+              timeoutSeconds: 2
+              failureThreshold: 3
+              httpGet: { path: /v1/models, port: modelserver }
+            volumeMounts:
+              - { name: shm, mountPath: /dev/shm }
+              - { name: cache, mountPath: /.cache }
+              - { name: triton-cache, mountPath: /.triton }
+              - { name: vllm-config, mountPath: /.config }
+        volumes:
+          - name: shm
+            emptyDir: { medium: Memory, sizeLimit: 2Gi }
+          - name: cache
+            emptyDir: {}
+          - name: triton-cache
+            emptyDir: {}
+          - name: vllm-config
+            emptyDir: {}
 
 render:
   replicas: 1
   resources:
-    requests:
-      cpu: "250m"
-      memory: 1Gi
-    limits:
-      cpu: "1"
-      memory: 3Gi
+    requests: { cpu: "250m", memory: 1Gi }
+    limits: { cpu: "1", memory: 3Gi }

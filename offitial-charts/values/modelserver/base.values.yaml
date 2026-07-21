@@ -1,44 +1,26 @@
 ## Base values shared by every model server overlay.
-## Port of guides/recipes/modelserver/base/single-host/default/decode-deployment.yaml
 ##
-## Layer an accelerator/engine overlay on top:
-##   helm install ppc charts/llm-d-modelserver \
+## The decode Deployment's spec comes ENTIRELY from a `decode.spec` block that
+## mirrors the upstream patch-vllm.yaml — see any of the accelerator overlays.
+## Because Helm replaces (does not merge) lists, each accelerator overlay
+## carries a COMPLETE decode.spec, exactly like each kustomize overlay carries a
+## complete patch-vllm.yaml. This base only holds the non-spec, shared bits.
+##
+##   helm install ppc-ms charts/llm-d-modelserver \
 ##     -f values/modelserver/base.values.yaml \
 ##     -f values/modelserver/gpu-vllm.yaml \
 ##     -n $NAMESPACE
 
-# Selector label pairing model servers with the router's InferencePool. Must
-# match router.modelServers.matchLabels in the router values.
+# InferencePool selector — must match the router's modelServers.matchLabels.
 guideLabel: precise-prefix-cache-routing
 
 hfTokenSecret:
+  enabled: true
   name: llm-d-hf-token
   key: HF_TOKEN
 
-decode:
-  enabled: true
-  port: 8000
-  kvEvents:
-    enabled: true
-    port: 5556
-    # Must match router epp.llmd.precisePrefixCache.blockSize.
-    blockSize: 64
-  startupProbe:
-    initialDelaySeconds: 15
-    periodSeconds: 30
-    timeoutSeconds: 5
-    failureThreshold: 120
-  livenessProbe:
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 3
-  readinessProbe:
-    periodSeconds: 5
-    timeoutSeconds: 2
-    failureThreshold: 3
-
-# Standalone `vllm launch render` tokenizer Service.
-# Port of guides/precise-prefix-cache-routing/render/
+# Standalone render (tokenizer) Service. Port of
+# guides/precise-prefix-cache-routing/render/.
 render:
   enabled: true
   replicas: 3

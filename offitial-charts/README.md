@@ -101,8 +101,10 @@ offitial-charts/
 │   │   └── istio.yaml                   <- recipes/gateway/{base,istio}/
 │   └── modelserver/
 │       ├── base.values.yaml             <- recipes/modelserver/base/single-host/default/
-│       ├── gpu-vllm.yaml                <- modelserver/gpu/vllm/base/
-│       └── smoke-test.yaml              (not upstream)
+│       ├── gpu-vllm.yaml                <- decode.spec == patch-vllm.yaml
+│       ├── gpu-cuda.yaml                <- same, llm-d-cuda image
+│       ├── cpu-vllm.yaml / cpu-preseed.yaml
+│       └── cpu-preseed.yaml            (not upstream; offline)
 └── charts/
     ├── llm-d-gateway/
     ├── llm-d-router/
@@ -211,73 +213,79 @@ LoRA-adapter rollouts) ships in the same file but is unused here.
 
 See `crds/README.md`.
 
-## Model server customization
+## Model server customization (patch-shaped)
 
-`charts/llm-d-modelserver` exposes the knobs the upstream Kustomize overlay
-would require a patch for:
+`charts/llm-d-modelserver` renders the decode Deployment from a `decode.spec`
+block laid out **exactly like the upstream kustomize patch**
+(`guides/.../modelserver/gpu/vllm/base/patch-vllm.yaml`). The chart injects only
+what the kustomize base + labels transformer inject — metadata, the guide
+labels (InferencePool selector), the selector, the pod-template labels, and the
+ServiceAccount. Everything under `decode.spec` is passed through **verbatim**,
+so you have full kustomize-style control and nothing to un-learn when updating.
 
 ```yaml
-serviceAccount:
-  create: false          # bind an existing SA instead of creating one
-  name: my-existing-sa
-  annotations: {}
-  automountServiceAccountToken: false
-
 decode:
-  # Appended verbatim to `vllm serve`. vLLM takes the last occurrence of a
-  # repeated flag, so these also override the generated ones.
-  extraArgs:
-    - "--max-model-len=32768"
-    - "--gpu-memory-utilization=0.92"
-
-  annotations:                       # pod template
-    sidecar.istio.io/inject: "false"
-  deploymentAnnotations: {}          # Deployment object
-  podLabels: {}
-
-  podSecurityContext:                # run as root
-    runAsUser: 0
-    runAsGroup: 0
-    fsGroup: 0
-    runAsNonRoot: false
-  securityContext:                   # container-level, wins over pod-level
-    capabilities:
-      add: ["IPC_LOCK"]
-
-  imagePullSecrets:
-    - name: my-registry-creds
+  spec:                        # == patch-vllm.yaml `spec:`
+    replicas: 8
+    template:
+      spec:
+        containers:
+          - name: modelserver
+            image: vllm/vllm-openai:v0.23.0
+            command: ["vllm", "serve"]
+            args: [ Qwen/Qwen3-32B, --tensor-parallel-size=2, --block-size=64, ... ]
+            env: [ ... ]        # HF_TOKEN, KV_EVENTS_ENDPOINT, ...
+            securityContext:    # run as root, add caps, etc. — your call
+              runAsUser: 0
+            resources: { ... }
+            volumeMounts: [ ... ]
+        # anything else you'd put in a pod spec (nodeSelector, tolerations,
+        # affinity, imagePullSecrets, priorityClassName, hostNetwork, ...) goes
+        # here and renders untouched.
+        volumes: [ ... ]
 ```
+
+Because Helm **replaces** lists rather than merging them, each accelerator
+overlay carries a COMPLETE `decode.spec` — exactly as each kustomize overlay
+carries a complete `patch-vllm.yaml`. Pick one:
+
+| Overlay | decode.spec |
+|---|---|
+| `values/modelserver/gpu-vllm.yaml` | NVIDIA GPU, `vllm/vllm-openai:v0.23.0`, 8×TP2 |
+| `values/modelserver/gpu-cuda.yaml` | NVIDIA GPU, `ghcr.io/llm-d/llm-d-cuda:v0.8.1` (RHEL UBI9) |
+| `values/modelserver/cpu-vllm.yaml` | CPU, download at startup |
+| `values/modelserver/cpu-preseed.yaml` | CPU, weights from a node hostPath (offline) |
+
+Chart-owned, structured (separate resources, not part of the pod spec):
+`serviceAccount.*`, `render.*`, `monitoring.podMonitor.*`, `autoscaling.keda.*`,
+and the `model.label` / `guideLabel` / `accelerator.*` labels.
 
 ### Loading the model from an existing PVC
 
-`modelCache` mounts a PVC (or hostPath) you already created — the chart **never
-creates a PVC**. Weights are read from it instead of downloaded, which is the
-clean way to serve on air-gapped or filtered networks, or to share one cached
-copy across replicas.
+There is no dedicated knob — mount it directly in `decode.spec`, kustomize-style
+(the chart never creates a PVC). See
+`values/modelserver/model-pvc.example.yaml`:
 
 ```yaml
-modelCache:
-  enabled: true
-  existingClaim: my-model-pvc    # must already exist in the namespace
-  mountPath: /model-cache
-  setHfHome: true                # exports HF_HOME=/model-cache
-  offline: true                  # HF_HUB_OFFLINE=1 — never hit the network
-  readOnly: true                 # a ReadOnlyMany PVC can back every replica
+decode:
+  spec:
+    template:
+      spec:
+        containers:
+          - name: modelserver
+            env:
+              - { name: HF_HOME, value: /model-cache }
+              - { name: HF_HUB_OFFLINE, value: "1" }
+            volumeMounts:
+              - { name: model-cache, mountPath: /model-cache, readOnly: true }
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: my-model-pvc   # must already exist
 ```
 
-The PVC should hold a Hugging Face cache tree (`…/hub/models--org--name/…`).
-If it lives in a subdirectory, use `modelCache.subPath` or set `mountPath` so
-`<mountPath>/hub` resolves. Set `hostPath` instead of `existingClaim` for a
-single-node/dev cluster. Enabling it without either fails the render with a
-clear message rather than producing a broken Deployment.
-
-The same `annotations` / `podLabels` / `podSecurityContext` / `securityContext`
-/ `imagePullSecrets` keys exist under `render`, plus `render.serviceAnnotations`
-for the Service object.
-
-> Annotation values are force-quoted by the templates. Kubernetes requires
-> annotation values to be strings, and `--set decode.annotations.foo=false`
-> would otherwise render an unquoted YAML bool that the API server rejects.
+A `ReadOnlyMany` PVC holding an HF cache tree (`…/hub/models--org--name/…`) can
+back every replica.
 
 ## Flow control
 
@@ -474,6 +482,6 @@ chart.
 | Item | Note |
 |---|---|
 | `Makefile` | Convenience wrapper only — no configuration lives here |
-| `values/guides/smoke-test.yaml`, `values/modelserver/smoke-test.yaml` | The 1-GPU sizing and `maxConcurrency: 16` / `64,32,8` bands are **scaled-down guesses**, not upstream-tested. Upstream has no small-cluster profile |
-| `decode.extraArgs` / `extraEnv` / `nodeSelector` / `tolerations` / `affinity` | Standard Helm escape hatches, empty by default |
+| `values/guides/cpu-smoke.yaml`, `values/modelserver/cpu-*.yaml` | Small-cluster sizing and `maxConcurrency` are **scaled-down guesses**, not upstream-tested. Upstream has no small-cluster profile |
+| `decode.spec` passthrough (nodeSelector, tolerations, affinity, …) | Rendered verbatim from your patch-shaped values; nothing chart-specific |
 | `charts/llm-d-gateway` values *schema* | Rendered output matches upstream; the values structure around it is new |

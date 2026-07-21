@@ -1,0 +1,30 @@
+## Example: load the model from an EXISTING PVC (patch-shaped).
+## Replaces the old modelCache convenience knob — express it directly in
+## decode.spec, kustomize-style. The chart never creates a PVC.
+##
+## This is a PARTIAL example showing only the PVC-related additions; drop these
+## into whichever full decode.spec overlay you use (gpu-vllm.yaml, etc.):
+
+decode:
+  spec:
+    template:
+      spec:
+        containers:
+          - name: modelserver
+            # ... your existing container ...
+            env:
+              # ... plus:
+              - name: HF_HOME
+                value: /model-cache
+              - name: HF_HUB_OFFLINE     # optional: never hit the network
+                value: "1"
+            volumeMounts:
+              # ... plus:
+              - name: model-cache
+                mountPath: /model-cache
+                readOnly: true
+        volumes:
+          # ... plus:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: my-model-pvc    # must already exist in the namespace

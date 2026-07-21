@@ -1,5 +1,13 @@
 {{- if .Values.decode.enabled }}
 {{- $d := .Values.decode }}
+{{- /*
+  The chart owns ONLY what the upstream kustomize base + labels transformer own:
+  metadata, the guide labels (InferencePool selector), the selector, the pod
+  template labels, and the ServiceAccount. Everything under `decode.spec` is
+  YOUR patch — laid out exactly like guides/.../modelserver/gpu/vllm/base/
+  patch-vllm.yaml's `spec:` block, and rendered verbatim. Nothing in it is
+  templated by the chart, so you keep full kustomize-style control.
+*/ -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,212 +16,32 @@ metadata:
   labels:
     {{- include "llm-d-modelserver.labels" . | nindent 4 }}
     {{- include "llm-d-modelserver.decodeSelectorLabels" . | nindent 4 }}
-  {{- with $d.deploymentAnnotations }}
-  annotations:
-    {{- range $k, $v := . }}
-    {{ $k }}: {{ $v | quote }}
-    {{- end }}
-  {{- end }}
 spec:
-  replicas: {{ $d.replicas }}
+  replicas: {{ dig "spec" "replicas" 1 $d }}
   selector:
     matchLabels:
       {{- include "llm-d-modelserver.decodeSelectorLabels" . | nindent 6 }}
+  {{- with dig "spec" "strategy" dict $d }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   template:
     metadata:
       labels:
         {{- include "llm-d-modelserver.decodeSelectorLabels" . | nindent 8 }}
-        {{- with $d.podLabels }}
+        {{- with dig "spec" "template" "metadata" "labels" dict $d }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with $d.annotations }}
+      {{- with dig "spec" "template" "metadata" "annotations" dict $d }}
       annotations:
         {{- range $k, $v := . }}
         {{ $k }}: {{ $v | quote }}
         {{- end }}
       {{- end }}
     spec:
+      # Chart-injected (kustomize base owns this). Override by putting
+      # serviceAccountName in decode.spec.template.spec.
       serviceAccountName: {{ include "llm-d-modelserver.serviceAccountName" . }}
-      {{- with $d.podSecurityContext }}
-      # Pod-level security context. To run as root (e.g. for images that write
-      # outside the mounted emptyDirs), set runAsUser/runAsGroup/fsGroup to 0
-      # and runAsNonRoot: false.
-      securityContext:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with $d.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      containers:
-        - name: modelserver
-          image: "{{ $d.image.repository }}:{{ $d.image.tag }}"
-          imagePullPolicy: {{ $d.image.pullPolicy }}
-          {{- with $d.securityContext }}
-          # Container-level security context.
-          securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          command: ["vllm", "serve"]
-          args:
-            - "{{ .Values.model.name }}"
-            - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
-            - "--tensor-parallel-size={{ $d.tensorParallelSize }}"
-            # MUST match the router's epp.llmd.precisePrefixCache.blockSize.
-            - "--block-size={{ $d.kvEvents.blockSize }}"
-            {{- if $d.kvEvents.enabled }}
-            - "--kv-events-config"
-            - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@{{ .Values.model.name }}"}'
-            {{- end }}
-            {{- if $d.tracing.enabled }}
-            - "--otlp-traces-endpoint={{ $d.tracing.otlpEndpoint }}"
-            - "--collect-detailed-traces={{ $d.tracing.detailedTraces }}"
-            {{- end }}
-          {{- with $d.extraArgs }}
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          ports:
-            - name: modelserver
-              containerPort: {{ $d.port }}
-              protocol: TCP
-            {{- if $d.kvEvents.enabled }}
-            # Each router replica dials this per-pod ZMQ socket directly.
-            - name: kv-events
-              containerPort: {{ $d.kvEvents.port }}
-              protocol: TCP
-            {{- end }}
-          env:
-            {{- if .Values.hfTokenSecret.enabled }}
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.hfTokenSecret.name }}
-                  key: {{ .Values.hfTokenSecret.key }}
-            {{- end }}
-            - name: NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-            # Used in the kv-events topic so pods are keyed by their inference
-            # endpoint; must equal the modelserver container port.
-            - name: POD_PORT
-              value: {{ $d.port | quote }}
-            {{- if $d.kvEvents.enabled }}
-            # Bind per-pod so every router replica can subscribe independently
-            # (required for active-active EPP HA).
-            - name: KV_EVENTS_ENDPOINT
-              value: "tcp://*:{{ $d.kvEvents.port }}"
-            {{- end }}
-            # vLLM usage telemetry writes to /.config, which fails under
-            # restricted SecurityContexts (e.g. OpenShift).
-            - name: DO_NOT_TRACK
-              value: "1"
-            # Workaround for vllm-project/vllm#44548 (torch 2.11, vLLM >= 0.20).
-            # Applied by the gpu-vllm image component upstream.
-            - name: USER
-              value: llm-d
-            {{- if .Values.modelCache.enabled }}
-            # Point the HF cache at the mounted volume so weights already
-            # present there are used instead of re-downloaded.
-            {{- if .Values.modelCache.setHfHome }}
-            - name: HF_HOME
-              value: {{ .Values.modelCache.mountPath | quote }}
-            {{- end }}
-            {{- if .Values.modelCache.offline }}
-            # Never reach the network — fail if the model is not already cached.
-            - name: HF_HUB_OFFLINE
-              value: "1"
-            - name: TRANSFORMERS_OFFLINE
-              value: "1"
-            {{- end }}
-            {{- end }}
-            {{- with $d.extraEnv }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
-          resources:
-            {{- toYaml $d.resources | nindent 12 }}
-          startupProbe:
-            httpGet:
-              path: /v1/models
-              port: modelserver
-            {{- toYaml $d.startupProbe | nindent 12 }}
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: modelserver
-            {{- toYaml $d.livenessProbe | nindent 12 }}
-          readinessProbe:
-            httpGet:
-              path: /v1/models
-              port: modelserver
-            {{- toYaml $d.readinessProbe | nindent 12 }}
-          volumeMounts:
-            - name: shm
-              mountPath: /dev/shm
-            # HF downloads, JIT / torch-compile caches. The images do not set
-            # $HOME, so under a restricted SecurityContext (random non-root UID,
-            # e.g. OpenShift) ~/ resolves to the non-writable "/".
-            - name: cache
-              mountPath: /.cache
-            # Triton kernel autotune cache — same reason.
-            - name: triton-cache
-              mountPath: /.triton
-            # Usage-telemetry writes land in /.config.
-            - name: vllm-config
-              mountPath: /.config
-            {{- if .Values.modelCache.enabled }}
-            - name: model-cache
-              mountPath: {{ .Values.modelCache.mountPath | quote }}
-              readOnly: {{ .Values.modelCache.readOnly }}
-              {{- with .Values.modelCache.subPath }}
-              subPath: {{ . | quote }}
-              {{- end }}
-            {{- end }}
-            {{- with $d.extraVolumeMounts }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
-      volumes:
-        - name: shm
-          emptyDir:
-            medium: Memory
-            sizeLimit: {{ $d.shmSize }}
-        - name: cache
-          emptyDir: {}
-        - name: triton-cache
-          emptyDir: {}
-        - name: vllm-config
-          emptyDir: {}
-        {{- if .Values.modelCache.enabled }}
-        - name: model-cache
-          {{- if .Values.modelCache.existingClaim }}
-          # Mount an EXISTING PVC — this chart never creates one.
-          persistentVolumeClaim:
-            claimName: {{ .Values.modelCache.existingClaim }}
-          {{- else if .Values.modelCache.hostPath }}
-          hostPath:
-            path: {{ .Values.modelCache.hostPath }}
-            type: Directory
-          {{- else }}
-          {{- fail "modelCache.enabled=true requires either modelCache.existingClaim (a PVC name) or modelCache.hostPath" }}
-          {{- end }}
-        {{- end }}
-        {{- with $d.extraVolumes }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-      {{- with $d.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with $d.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with $d.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+      {{- /* Your patch's spec.template.spec, verbatim. */}}
+      {{- omit (dig "spec" "template" "spec" dict $d) "serviceAccountName" | toYaml | nindent 6 }}
 {{- end }}

@@ -23,27 +23,19 @@
 ## Then apply this file to the modelserver release.
 
 ## ---- llm-d-modelserver ----
-decode:
-  extraVolumes:
-    - name: network-ca
-      configMap:
-        name: network-ca-bundle
-  extraVolumeMounts:
-    - name: network-ca
-      mountPath: /etc/ssl/network-ca
-      readOnly: true
-  # IMPORTANT: Helm REPLACES lists, it does not merge them. Because your model
-  # overlay (e.g. cpu-vllm.yaml) already sets decode.extraEnv, you cannot add a
-  # second extraEnv here — the last -f wins and one set is lost. Put these three
-  # env vars in the SAME extraEnv list as your other vars instead:
-  #
-  #   - name: SSL_CERT_FILE
-  #     value: /etc/ssl/network-ca/ca-bundle.crt
-  #   - name: REQUESTS_CA_BUNDLE
-  #     value: /etc/ssl/network-ca/ca-bundle.crt
-  #   - name: CURL_CA_BUNDLE
-  #     value: /etc/ssl/network-ca/ca-bundle.crt
-
+## decode is patch-shaped, so mount the CA directly in your decode.spec:
+##   containers:
+##     - name: modelserver
+##       env:
+##         - { name: SSL_CERT_FILE,       value: /etc/ssl/network-ca/ca-bundle.crt }
+##         - { name: REQUESTS_CA_BUNDLE,  value: /etc/ssl/network-ca/ca-bundle.crt }
+##       volumeMounts:
+##         - { name: network-ca, mountPath: /etc/ssl/network-ca, readOnly: true }
+##   volumes:
+##     - name: network-ca
+##       configMap: { name: network-ca-bundle }
+##
+## The render Service still takes extraVolumes/extraVolumeMounts structurally:
 render:
   extraVolumes:
     - name: network-ca

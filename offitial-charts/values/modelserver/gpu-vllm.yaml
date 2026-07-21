@@ -1,9 +1,8 @@
-## NVIDIA GPU / vLLM overlay — the guide default.
-## Port of guides/precise-prefix-cache-routing/modelserver/gpu/vllm/base/
-##      + guides/recipes/modelserver/components/images/gpu-vllm/
-##
-## Canonical benchmark shape: 8 replicas x TP2 = 16 GPUs (16xH100).
-## Reduce `decode.replicas` for smaller fleets.
+## NVIDIA GPU / vLLM — the guide default.
+## `decode.spec` is a VERBATIM port of
+##   guides/precise-prefix-cache-routing/modelserver/gpu/vllm/base/patch-vllm.yaml
+## (spec block), plus the image the gpu-vllm kustomize component substitutes and
+## the USER=llm-d env it patches in. 8 replicas x TP2 = 16 GPUs (16xH100).
 
 model:
   name: Qwen/Qwen3-32B
@@ -14,20 +13,100 @@ accelerator:
   vendor: nvidia
 
 decode:
-  engine: vllm
-  replicas: 8
-  tensorParallelSize: 2
-  image:
-    repository: vllm/vllm-openai
-    tag: v0.23.0
-    pullPolicy: IfNotPresent
-  resources:
-    requests:
-      cpu: "8"
-      memory: 96Gi
-      nvidia.com/gpu: 2
-    limits:
-      cpu: "16"
-      memory: 128Gi
-      nvidia.com/gpu: 2
-  shmSize: 20Gi
+  enabled: true
+  spec:
+    replicas: 8
+    template:
+      spec:
+        containers:
+          - name: modelserver
+            image: vllm/vllm-openai:v0.23.0
+            imagePullPolicy: IfNotPresent
+            command: ["vllm", "serve"]
+            args:
+              - Qwen/Qwen3-32B
+              - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+              - --tensor-parallel-size=2
+              - --block-size=64                       # MUST match router blockSize
+              - --kv-events-config
+              - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@Qwen/Qwen3-32B"}'
+            ports:
+              - containerPort: 5556
+                name: kv-events
+                protocol: TCP
+              - containerPort: 8000
+                name: modelserver
+                protocol: TCP
+            env:
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: llm-d-hf-token
+                    key: HF_TOKEN
+              - name: NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.podIP
+              - name: POD_PORT
+                value: "8000"
+              - name: KV_EVENTS_ENDPOINT
+                value: "tcp://*:5556"
+              - name: DO_NOT_TRACK
+                value: "1"
+              - name: USER                            # gpu-vllm image component (vllm#44548)
+                value: llm-d
+            resources:
+              limits:
+                cpu: '16'
+                memory: 128Gi
+                nvidia.com/gpu: 2
+              requests:
+                cpu: '8'
+                memory: 96Gi
+                nvidia.com/gpu: 2
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: shm
+              - mountPath: /.cache
+                name: torch-compile-cache
+              - mountPath: /.triton
+                name: triton-cache
+              - mountPath: /.config
+                name: vllm-config
+            startupProbe:
+              initialDelaySeconds: 15
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 120
+              httpGet:
+                path: /v1/models
+                port: modelserver
+            livenessProbe:
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: modelserver
+            readinessProbe:
+              periodSeconds: 5
+              timeoutSeconds: 2
+              failureThreshold: 3
+              httpGet:
+                path: /v1/models
+                port: modelserver
+        volumes:
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 20Gi
+          - name: torch-compile-cache
+            emptyDir: {}
+          - name: triton-cache
+            emptyDir: {}
+          - name: vllm-config
+            emptyDir: {}

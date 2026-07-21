@@ -1,26 +1,119 @@
-## Loads weights from a pre-seeded node hostPath instead of downloading.
-## Use on air-gapped / filtered networks where the in-image huggingface_hub
-## cannot fetch weights. Seed first (see RUNBOOK "pre-seed"), then layer this
-## AFTER cpu-vllm.yaml so its extraEnv/extraVolumes win.
+## CPU-only, weights PRE-SEEDED on a node hostPath (offline load).
+## This is the exact config verified on minikube. Full decode.spec (a complete
+## patch), self-contained — use INSTEAD of gpu-vllm.yaml, not layered on it.
+##
+## Seed first (see RUNBOOK "pre-seed"): a throwaway pod downloads the model to
+## the node's /data/hf-models, then this mounts it and runs HF_HUB_OFFLINE=1.
+## NOT upstream sizing — scaled for a laptop node.
+
+model:
+  name: Qwen/Qwen2.5-0.5B-Instruct
+  label: Qwen2.5-0.5B-Instruct
+
+accelerator:
+  variant: cpu
+  vendor: intel
+
+hfTokenSecret:
+  enabled: false          # public model + offline; render also needs this off
+
 decode:
-  extraEnv:
-    - name: VLLM_CPU_KVCACHE_SPACE
-      value: "1"
-    - name: VLLM_CPU_NUM_OF_RESERVED_CPU
-      value: "1"
-    # Never hit the network for weights — read the mounted cache only.
-    - name: HF_HOME
-      value: /hf-home/hf
-    - name: HF_HUB_OFFLINE
-      value: "1"
-    - name: TRANSFORMERS_OFFLINE
-      value: "1"
-  extraVolumes:
-    - name: hf-seed
-      hostPath:
-        path: /data/hf-models
-        type: Directory
-  extraVolumeMounts:
-    - name: hf-seed
-      mountPath: /hf-home
-      readOnly: true
+  enabled: true
+  spec:
+    replicas: 1
+    template:
+      spec:
+        containers:
+          - name: modelserver
+            image: vllm/vllm-openai-cpu:v0.23.0
+            imagePullPolicy: IfNotPresent
+            command: ["vllm", "serve"]
+            args:
+              - Qwen/Qwen2.5-0.5B-Instruct
+              - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+              - --disable-hybrid-kv-cache-manager        # required on CPU backend
+              - --max_model_len=2048
+              - --block-size=64
+              - --enable-prefix-caching
+              - --kv-events-config
+              - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@Qwen/Qwen2.5-0.5B-Instruct"}'
+            ports:
+              - containerPort: 5556
+                name: kv-events
+                protocol: TCP
+              - containerPort: 8000
+                name: modelserver
+                protocol: TCP
+            env:
+              - name: NAMESPACE
+                valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+              - name: POD_IP
+                valueFrom: { fieldRef: { fieldPath: status.podIP } }
+              - name: POD_PORT
+                value: "8000"
+              - name: KV_EVENTS_ENDPOINT
+                value: "tcp://*:5556"
+              - name: DO_NOT_TRACK
+                value: "1"
+              - name: VLLM_CPU_KVCACHE_SPACE
+                value: "1"
+              - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+                value: "1"
+              # Load from the mounted node cache, never the network.
+              - name: HF_HOME
+                value: /hf-home/hf
+              - name: HF_HUB_OFFLINE
+                value: "1"
+              - name: TRANSFORMERS_OFFLINE
+                value: "1"
+            securityContext:                              # CPU backend pins threads
+              seccompProfile:
+                type: Unconfined
+              capabilities:
+                add: ["SYS_NICE"]
+            resources:
+              requests:
+                cpu: "2"
+                memory: 3Gi
+              limits:
+                cpu: "3"
+                memory: 6Gi
+            startupProbe:
+              initialDelaySeconds: 15
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 120
+              httpGet: { path: /v1/models, port: modelserver }
+            livenessProbe:
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+              httpGet: { path: /health, port: modelserver }
+            readinessProbe:
+              periodSeconds: 5
+              timeoutSeconds: 2
+              failureThreshold: 3
+              httpGet: { path: /v1/models, port: modelserver }
+            volumeMounts:
+              - { name: shm, mountPath: /dev/shm }
+              - { name: cache, mountPath: /.cache }
+              - { name: triton-cache, mountPath: /.triton }
+              - { name: vllm-config, mountPath: /.config }
+              - { name: hf-seed, mountPath: /hf-home, readOnly: true }
+        volumes:
+          - name: shm
+            emptyDir: { medium: Memory, sizeLimit: 2Gi }
+          - name: cache
+            emptyDir: {}
+          - name: triton-cache
+            emptyDir: {}
+          - name: vllm-config
+            emptyDir: {}
+          - name: hf-seed
+            hostPath: { path: /data/hf-models, type: Directory }
+
+render:
+  replicas: 1
+  resources:
+    requests: { cpu: "250m", memory: 1Gi }
+    limits: { cpu: "1", memory: 3Gi }

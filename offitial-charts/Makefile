@@ -27,6 +27,9 @@ ROUTER_VALUES := \
 MS_VALUES := \
   -f values/modelserver/base.values.yaml \
   -f values/modelserver/gpu-vllm.yaml
+MS_SMOKE_VALUES := \
+  -f values/modelserver/base.values.yaml \
+  -f values/modelserver/cpu-preseed.yaml
 
 GW_VALUES := -f values/gateway/istio.yaml
 
@@ -48,7 +51,7 @@ ROUTER_VALUES := \
   -f values/base.values.yaml \
   -f values/guides/cpu-smoke.yaml \
   -f values/features/httproute-flags.yaml
-MS_VALUES     += -f values/modelserver/smoke-test.yaml
+MS_VALUES     := $(MS_SMOKE_VALUES)
 endif
 
 .PHONY: help deps crds namespace secret gateway router modelserver install uninstall \

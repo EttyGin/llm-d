@@ -13,8 +13,9 @@ llmd:
         samplerArg: "0.05"
 
 ## ---- llm-d-modelserver ----
-decode:
-  tracing:
-    enabled: true
-    otlpEndpoint: "http://otel-collector:4317"
-    detailedTraces: "all"
+## decode is now patch-shaped (decode.spec verbatim), so there is no
+## decode.tracing knob. To trace the model server, add these two args and the
+## endpoint env directly in your decode.spec container:
+##   args:
+##     - --otlp-traces-endpoint=http://otel-collector:4317
+##     - --collect-detailed-traces=all
