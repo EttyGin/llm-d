@@ -48,6 +48,11 @@ eppPlugins:
   precisePrefixCache:
     enabled: true
     blockSize: 64
+    # Predicts cache entries right after routing to keep back-to-back
+    # same-prefix requests sticky before the confirming KVEvent arrives (2s TTL).
+    # Recommended true in production. Set false to disable — e.g. if a bug in
+    # your router build mis-speculates and breaks affinity; correctness then
+    # relies only on confirmed events. This IS honoured when set to false.
     speculativeIndexing: true
     enableMetrics: true
     kvEvents:

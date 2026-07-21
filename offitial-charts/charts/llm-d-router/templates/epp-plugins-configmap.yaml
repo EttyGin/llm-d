@@ -59,14 +59,17 @@ data:
         tokenProcessorConfig:
           # MUST match vLLM `--block-size`.
           blockSize: {{ $ppc.blockSize | default 64 }}
-        speculativeIndexing: {{ $ppc.speculativeIndexing | default true }}
+        {{- /* `| default true` would force true even when explicitly set to
+               false (Helm treats false as empty). hasKey respects an explicit
+               false while still defaulting when the key is absent. */}}
+        speculativeIndexing: {{ if hasKey $ppc "speculativeIndexing" }}{{ $ppc.speculativeIndexing }}{{ else }}true{{ end }}
         indexerConfig:
           kvBlockIndexConfig:
-            enableMetrics: {{ $ppc.enableMetrics | default true }}
+            enableMetrics: {{ if hasKey $ppc "enableMetrics" }}{{ $ppc.enableMetrics }}{{ else }}true{{ end }}
         kvEventsConfig:
           topicFilter: {{ $ppc.kvEvents.topicFilter | default "kv@" | quote }}
           concurrency: {{ $ppc.kvEvents.concurrency | default 8 }}
-          discoverPods: {{ $ppc.kvEvents.discoverPods | default true }}
+          discoverPods: {{ if hasKey $ppc.kvEvents "discoverPods" }}{{ $ppc.kvEvents.discoverPods }}{{ else }}true{{ end }}
           podDiscoveryConfig:
             socketPort: {{ $ppc.kvEvents.socketPort | default 5556 }}
     - type: prefix-cache-scorer

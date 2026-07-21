@@ -27,6 +27,7 @@ eppPlugins:
     enabled: true
     # Must match vLLM `--block-size`.
     blockSize: 64
+    # See charts/.../values.yaml — set false to disable speculative entries.
     speculativeIndexing: true
     enableMetrics: true
     kvEvents:
