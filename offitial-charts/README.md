@@ -337,6 +337,45 @@ under your load.
 > the modelserver chart cannot infer. It fails loudly rather than silently
 > querying a Service that does not exist.
 
+## Production install (GPU, EPP + tokenizer in one pod)
+
+Runs the model servers on GPU with production images, and co-locates the
+tokenizer as a **sidecar in the EPP pod** (no separate render Service):
+
+```bash
+# Gateway
+helm upgrade --install ppc-gw charts/llm-d-gateway -n $NS \
+  -f values/gateway/istio.yaml
+
+# Router: EPP (HA, 2 replicas) + tokenizer sidecar + flow control
+helm upgrade --install ppc charts/llm-d-router -n $NS \
+  -f values/base.values.yaml \
+  -f values/guides/precise-prefix-cache-routing.yaml \
+  -f values/guides/flow-control.yaml \
+  -f values/features/httproute-flags.yaml \
+  -f values/features/tokenizer-sidecar.yaml
+
+# Model servers: GPU/vLLM production image, render Service disabled
+helm upgrade --install ppc-ms charts/llm-d-modelserver -n $NS \
+  -f values/modelserver/base.values.yaml \
+  -f values/modelserver/gpu-vllm.yaml \
+  -f values/features/tokenizer-sidecar.yaml
+```
+
+Produces:
+
+| Component | Image | Where |
+|---|---|---|
+| EPP | `ghcr.io/llm-d/llm-d-router-endpoint-picker:v0.9.0` | EPP pod (x2, HA) |
+| Tokenizer | `docker.io/vllm/vllm-openai-cpu:v0.23.0` (`vllm launch render`) | **same pod as EPP** |
+| Model server | `vllm/vllm-openai:v0.23.0` | GPU decode pods |
+
+All images are production tags (no `-dev`). Point `registry`/`repository` at
+your own mirror/air-gapped registry via `-f` or `--set`. The tokenizer stays on
+the GPU-less `vllm-openai-cpu` image on purpose — it only tokenizes, so it needs
+no GPU and lets the EPP pod schedule on a CPU node; see the note below before
+switching it to the full image.
+
 ## Tokenization topology: sidecar vs. Service
 
 Precise prefix-cache routing needs **exact token IDs** before it can route: the
