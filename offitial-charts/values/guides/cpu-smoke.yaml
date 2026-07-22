@@ -89,22 +89,28 @@ llmd:
                 - pluginRef: no-hit-lru-scorer
                   weight: 2.0
           flowControl:
-            maxBytes: "10Gi"
-            maxRequests: "1k"
-            defaultRequestTTL: "60s"
+            # No shedding: every request queues until backend capacity frees up,
+            # nothing is rejected with 429. maxRequests: 0 = unlimited (count),
+            # defaultRequestTTL: "0s" = wait for the client deadline (no TTL-based
+            # 503). Priority still orders dispatch OUT of the queue. NOTE: this EPP
+            # is capped at 2Gi memory, so the 2Gi maxBytes guardrail below is the
+            # real ceiling — the pod OOMs before a larger queue could form.
+            maxBytes: "2Gi"
+            maxRequests: 0
+            defaultRequestTTL: "0s"
             saturationDetector:
               pluginRef: concurrency-detector
             priorityBands:
               - priority: 100
-                maxRequests: "32"
+                maxRequests: 0
                 fairnessPolicyRef: round-robin-fairness-policy
                 orderingPolicyRef: fcfs-ordering-policy
               - priority: 0
-                maxRequests: "16"
+                maxRequests: 0
                 fairnessPolicyRef: round-robin-fairness-policy
                 orderingPolicyRef: fcfs-ordering-policy
               - priority: -10
-                maxRequests: "4"
+                maxRequests: 0
                 fairnessPolicyRef: round-robin-fairness-policy
                 orderingPolicyRef: fcfs-ordering-policy
 

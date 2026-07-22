@@ -89,22 +89,29 @@ llmd:
                 - pluginRef: no-hit-lru-scorer
                   weight: 2.0
           flowControl:
+            # No shedding: every request queues until backend capacity frees up,
+            # nothing is rejected with 429. maxRequests: 0 = unlimited (count),
+            # defaultRequestTTL: "0s" = wait for the client deadline (no TTL-based
+            # 503). maxBytes stays as an EPP-memory OOM guardrail only. Priority
+            # still orders dispatch OUT of the queue — prioritisation without
+            # load-shedding. Defaults per configuration.md (maxBytes/maxRequests
+            # 0 = unlimited, TTL 0s = client context deadline).
             maxBytes: "10Gi"
-            maxRequests: "1k"
-            defaultRequestTTL: "60s"
+            maxRequests: 0
+            defaultRequestTTL: "0s"
             saturationDetector:
               pluginRef: concurrency-detector
             priorityBands:
               - priority: 100
-                maxRequests: "500"
+                maxRequests: 0
                 fairnessPolicyRef: round-robin-fairness-policy
                 orderingPolicyRef: fcfs-ordering-policy
               - priority: 0
-                maxRequests: "200"
+                maxRequests: 0
                 fairnessPolicyRef: round-robin-fairness-policy
                 orderingPolicyRef: fcfs-ordering-policy
               - priority: -10
-                maxRequests: "50"
+                maxRequests: 0
                 fairnessPolicyRef: round-robin-fairness-policy
                 orderingPolicyRef: fcfs-ordering-policy
 
