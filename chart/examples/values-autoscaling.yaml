@@ -1,0 +1,13 @@
+# Enable KEDA autoscaling. Requires KEDA + Prometheus. The EPP ServiceMonitor
+# that feeds it is created by default (metrics are on out of the box).
+#
+#   helm install my-llm-d . -n <ns> -f examples/values-autoscaling.yaml
+
+llm-d-modelserver:
+  autoscaling:
+    keda:
+      enabled: true
+      # The EPP Service is "<release>-epp". With `helm install my-llm-d .`:
+      eppServiceName: my-llm-d-epp
+      minReplicas: 1
+      maxReplicas: 8

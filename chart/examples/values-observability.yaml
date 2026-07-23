@@ -1,0 +1,48 @@
+# =============================================================================
+# Tracing overlay — distributed (OpenTelemetry) tracing, one flag.
+#
+#   ON:   helm install my-llm-d . -n <ns> -f examples/values-observability.yaml
+#   OFF:  omit this -f. (Prometheus METRICS are ON by default in the base chart;
+#         this overlay only adds TRACING, which needs a collector.)
+#
+# CLIENT-SIDE ONLY: the EPP and vLLM EMIT to a collector you already run — this
+# file does NOT create an OTel Collector or Jaeger. Deploy those separately:
+#   ./guides/recipes/observability/install-otel-collector-jaeger.sh -n <ns>
+#
+# Docs: docs/operations/observability/tracing.md
+# =============================================================================
+
+# OTLP endpoint + sampling — written once, used by the EPP and the model servers.
+observability:
+  otlpEndpoint: &otlp "http://otel-collector:4317"
+  samplerArg: &samplerArg "0.1"   # 10% in production; "1.0" while validating
+
+llm-d-router:
+  llmd:
+    router:
+      # EPP emits routing/scoring/KV-index spans to the collector.
+      tracing:
+        enabled: true
+        otelExporterEndpoint: *otlp
+        sampling:
+          sampler: "parentbased_traceidratio"
+          samplerArg: *samplerArg
+
+# Model server tracing via the ADDITIVE knobs (append to decode.spec).
+llm-d-modelserver:
+  decode:
+    extraArgs:
+      - --otlp-traces-endpoint
+      - *otlp
+      - --collect-detailed-traces=all
+    extraEnv:
+      - name: OTEL_SERVICE_NAME
+        value: "vllm-decode"
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: *otlp
+      - name: OTEL_TRACES_EXPORTER
+        value: "otlp"
+      - name: OTEL_TRACES_SAMPLER
+        value: "parentbased_traceidratio"
+      - name: OTEL_TRACES_SAMPLER_ARG
+        value: *samplerArg

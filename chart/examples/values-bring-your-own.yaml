@@ -1,0 +1,19 @@
+# Bring your own ServiceAccount + a hardened pod.
+#
+#   helm install my-llm-d . -n <ns> -f examples/values-bring-your-own.yaml
+#
+# (EPP RBAC is created by the upstream router chart and cannot be swapped — this
+# controls the MODEL SERVER only.)
+
+llm-d-modelserver:
+  serviceAccount:
+    create: false          # don't create one
+    name: my-existing-sa   # bind this existing SA
+  decode:
+    podSecurityContext:
+      runAsNonRoot: true
+      fsGroup: 2000
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]

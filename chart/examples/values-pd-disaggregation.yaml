@@ -1,0 +1,76 @@
+# =============================================================================
+# Reproduces the ROUTER side of guides/pd-disaggregation (prefill/decode split).
+#
+#   helm install my-llm-d . -n <ns> -f examples/values-pd-disaggregation.yaml
+#
+# ⚠ IMPORTANT — this chart deploys the PD-aware ROUTER only, NOT the PD model
+#   servers. P/D disaggregation needs TWO model-server Deployments (a prefill
+#   role AND a decode role) plus a routing-proxy sidecar on the decode pod. The
+#   llm-d-modelserver subchart models only a single `decode` role (one
+#   Deployment, hardcoded llm-d.ai/role: decode, no sidecar), and it is left
+#   untouched — so the prefill+decode+sidecar servers CANNOT be produced here.
+#
+#   Deploy the model servers from the guide's kustomize instead:
+#     export NAMESPACE=<ns> INFRA_PROVIDER=base
+#     kubectl apply -n $NAMESPACE \
+#       -k $REPO_ROOT/guides/pd-disaggregation/modelserver/gpu/vllm/$INFRA_PROVIDER
+#   They carry llm-d.ai/guide: pd-disaggregation, which the EPP below selects; the
+#   EPP then splits traffic across roles via the prefill-filter / decode-filter.
+#
+# Accordingly this file disables the chart's decode server (decode.enabled:false)
+# so it doesn't deploy a lone non-PD decode. Model: openai/gpt-oss-120b.
+# =============================================================================
+
+# The chart does not create the PD model servers (see header) — disable decode.
+llm-d-modelserver:
+  decode:
+    enabled: false
+
+llm-d-router:
+  llmd:
+    router:
+      # Tokenizer sidecar (prefix-cache-scorer tokenizes requests).
+      tokenizer:
+        enabled: true
+        modelName: openai/gpt-oss-120b
+
+      # Selects BOTH prefill and decode pods deployed by the guide's kustomize.
+      modelServers:
+        matchLabels:
+          llm-d.ai/guide: "pd-disaggregation"
+
+      epp:
+        pluginsConfigFile: "pd-config.yaml"
+        pluginsCustomConfig:
+          pd-config.yaml: |
+            apiVersion: llm-d.ai/v1alpha1
+            kind: EndpointPickerConfig
+            plugins:
+            - type: disagg-headers-handler
+            - type: always-disagg-pd-decider
+            - type: disagg-profile-handler
+              parameters:
+                deciderPluginName: always-disagg-pd-decider
+            - type: prefill-filter
+            - type: decode-filter
+            - type: prefix-cache-scorer
+            - type: queue-scorer
+            - type: kv-cache-utilization-scorer
+            - type: active-request-scorer
+            schedulingProfiles:
+            - name: prefill
+              plugins:
+              - pluginRef: prefill-filter
+              - pluginRef: prefix-cache-scorer
+                weight: 3
+              - pluginRef: queue-scorer
+                weight: 2
+              - pluginRef: kv-cache-utilization-scorer
+                weight: 2
+            - name: decode
+              plugins:
+              - pluginRef: decode-filter
+              - pluginRef: active-request-scorer
+                weight: 2
+              - pluginRef: prefix-cache-scorer
+                weight: 3

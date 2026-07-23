@@ -1,0 +1,17 @@
+{{- /*
+Fail-fast validation for the umbrella chart. Emits no resources — the guards run
+at render time so mistakes are caught by `helm template`/`install`, not at
+runtime. Keep this file free of any real Kubernetes output.
+*/ -}}
+{{- $id := .Values.identity | default dict -}}
+{{- if not $id.model }}
+{{- fail "identity.model is required (the full HuggingFace model name, e.g. Qwen/Qwen3-32B)." }}
+{{- end }}
+{{- if not $id.gateway }}
+{{- fail "identity.gateway is required (the name of the pre-existing Gateway the HTTPRoute binds to)." }}
+{{- end }}
+{{- $ms := index .Values "llm-d-modelserver" | default dict -}}
+{{- $keda := dig "autoscaling" "keda" dict $ms -}}
+{{- if and $keda.enabled (not $keda.eppServiceName) }}
+{{- fail "llm-d-modelserver.autoscaling.keda.eppServiceName is required when autoscaling is enabled: set it to \"<release>-epp\" (the router shares this umbrella's release name)." }}
+{{- end }}

@@ -1,0 +1,294 @@
+# =============================================================================
+# llm-d umbrella chart — values  (Router + model servers only)
+#
+#   ┌─────────────────────────────────────────────────────────────────────┐
+#   │  Edit the `identity:` block below ONCE. Every value is a YAML anchor  │
+#   │  (&name) referenced (*name) throughout the file, so the model name,   │
+#   │  gateway name, and guide label are never written twice.               │
+#   └─────────────────────────────────────────────────────────────────────┘
+#
+#   helm install my-llm-d . -n <namespace> -f my-values.yaml
+#
+# The two subcharts (charts/llm-d-router, charts/llm-d-modelserver) are NEVER
+# modified — this file feeds them through their normal values. The model name is
+# single-sourced into the vLLM args WITHOUT touching the chart by:
+#   • the serve positional arg  ->  *model  (a YAML alias)
+#   • the kv-events topic        ->  $(MODEL_NAME), a container env whose value is
+#     also *model, expanded by Kubernetes at runtime (same trick the stock spec
+#     already uses for $(POD_IP)/$(POD_PORT)).
+# So the literal model string is written exactly once, at &model.
+#
+# The GATEWAY is not managed here — deploy it separately (e.g. the standalone
+# llm-d-gateway chart) and put its name in identity.gateway so the router's
+# HTTPRoute binds to it.
+#
+# NOTE: change the model/gateway/guide by editing the identity block IN a values
+# file you pass with -f (anchors resolve within one file). A bare
+# `--set identity.model=...` will NOT propagate.
+# =============================================================================
+
+identity:
+  # Full HuggingFace model name. The ONE place the model string is written.
+  model: &model Qwen/Qwen3-32B
+  # Short label form (no "/") for the llm-d.ai/model label.
+  modelLabel: &modelLabel Qwen3-32B
+  # Guide / InferencePool selector value. Ties model servers to the router.
+  guide: &guide optimized-baseline
+  # Name of a PRE-EXISTING Gateway (deployed separately). The router HTTPRoute
+  # binds to this — nothing here creates the Gateway.
+  gateway: &gwName llm-d-inference-gateway
+  # Secret holding HF_TOKEN — how the model is pulled from HuggingFace.
+  hfTokenSecretName: &hfSecret llm-d-hf-token
+
+# Observability (tracing + Prometheus) is OFF by default. Turn the WHOLE thing on
+# with one flag:  -f examples/values-observability.yaml   (omit it = off).
+
+# =============================================================================
+# Router / EPP (subchart: llm-d-router — pure passthrough to the OCI chart)
+# Everything under `llmd:` mirrors the upstream llm-d-router-gateway values.
+#
+# EPP RBAC NOTE: the upstream chart ALWAYS creates the EPP ServiceAccount +
+# namespaced Role/RoleBinding (and a ClusterRole only when
+# router.monitoring.prometheus.enabled=true). There is no upstream knob to skip
+# them or point at an existing Role — bringing your own EPP Role is out of scope.
+# =============================================================================
+llm-d-router:
+  llmd:
+    provider:
+      name: istio # none | istio | gke
+
+    httpRoute:
+      # Gateway mode: create the HTTPRoute binding the InferencePool to the
+      # (externally-managed) Gateway named identity.gateway.
+      create: true
+      inferenceGatewayName: *gwName
+      requestTimeout: "0s"
+
+    router:
+      modelServers:
+        type: vllm
+        protocol: http
+        targetPorts:
+          - number: 8000
+        # Selects the model server pods. Kept IN SYNC with the labels the model
+        # servers actually carry (guide + model, from the same anchors). Add more
+        # keys here to narrow the pool further — the decode pods also carry
+        # llm-d.ai/accelerator-variant and llm-d.ai/accelerator-vendor.
+        matchLabels:
+          llm-d.ai/guide: *guide
+          llm-d.ai/model: *modelLabel
+
+      inferencePool:
+        create: true
+        failureMode: "FailOpen"
+
+      # Adds http:80 -> 8081 on the EPP Service (matches the guide).
+      extraServicePorts:
+        - name: http
+          port: 80
+          protocol: TCP
+          targetPort: 8081
+
+      epp:
+        replicas: 1
+        flags:
+          v: 2
+        resources:
+          requests: { cpu: "4", memory: 8Gi }
+          limits: { memory: 16Gi }
+        # ---- Plugin config: easy to control. Drop in a full EndpointPickerConfig.
+        # DEFAULT = the most basic, generic load-aware routing: send each request
+        # to the endpoint with the SHORTEST QUEUE and the LOWEST KV-CACHE usage
+        # (i.e. where it gets served fastest). No prefix-cache / tokenizer needed.
+        # (metrics-data-source + core-metrics-extractor are injected by default.)
+        # Opt into smarter routing with an example overlay:
+        #   examples/values-optimized-baseline.yaml         (prefix-cache affinity)
+        #   examples/values-precise-prefix-cache-routing.yaml (exact kv-cache index)
+        pluginsConfigFile: "load-aware-plugins.yaml"
+        pluginsCustomConfig:
+          load-aware-plugins.yaml: |
+            apiVersion: llm-d.ai/v1alpha1
+            kind: EndpointPickerConfig
+            plugins:
+            - type: queue-scorer
+            - type: kv-cache-utilization-scorer
+            schedulingProfiles:
+            - name: default
+              plugins:
+              - pluginRef: queue-scorer
+                weight: 1
+              - pluginRef: kv-cache-utilization-scorer
+                weight: 1
+
+      # Tokenizer sidecar — OFF by default (the basic routing above needs no
+      # tokenization). Enabled by the prefix-cache example overlays.
+      tokenizer:
+        enabled: false
+        modelName: *model
+
+      # Gateway mode: the (external) Gateway's own proxy handles the data plane.
+      proxy:
+        enabled: false
+
+      # Prometheus metrics ON by default: scrapes EPP /metrics via a ServiceMonitor
+      # (auth off = plain in-cluster scrape). REQUIRES the Prometheus Operator
+      # (ServiceMonitor CRD) — set prometheus.enabled:false if it is not installed.
+      monitoring:
+        interval: "10s"
+        prometheus:
+          enabled: true
+          auth:
+            enabled: false
+
+      # Tracing is opt-in (needs a collector) — enable via examples/values-observability.yaml.
+      tracing:
+        enabled: false
+
+      latencyPredictor:
+        enabled: false
+
+# =============================================================================
+# Model servers (subchart: llm-d-modelserver — decode.spec authored here,
+# rendered verbatim by the chart)
+# =============================================================================
+llm-d-modelserver:
+  model:
+    name: *model
+    label: *modelLabel
+  guideLabel: *guide
+  accelerator:
+    variant: gpu
+    vendor: nvidia
+
+  # How the model is pulled from HuggingFace (also referenced in decode.spec env).
+  hfTokenSecret:
+    enabled: true
+    name: *hfSecret
+    key: HF_TOKEN
+
+  # Bring your own SA: create:false + name:<existing>.
+  serviceAccount:
+    create: true
+    name: ""
+
+  decode:
+    enabled: true
+
+    # ── Extension surface (ADDITIVE — appended, they do NOT replace) ──────────
+    # extraArgs / extraEnv / extraVolumeMounts -> appended to the modelserver
+    #   container. extraVolumes -> pod volumes. Plus podAnnotations,
+    #   deploymentAnnotations, containerSecurityContext, podSecurityContext,
+    #   imagePullSecrets. See examples/ for existing-PVC and bring-your-own.
+    #
+    # ARGS — how to change vs. remove a default:
+    #   • Override a valued flag: append it here — vLLM/argparse takes the LAST
+    #     occurrence, so `--tensor-parallel-size=1` here beats the =2 in spec.args.
+    #   • REMOVE a default, or full control: edit decode.spec.args below directly
+    #     (this is the base — it all lives in THIS file; that is the override point).
+    extraArgs: []
+    extraEnv: []
+    extraVolumeMounts: []
+    extraVolumes: []
+    podAnnotations: {}
+    deploymentAnnotations: {}
+    containerSecurityContext: {}
+    podSecurityContext: {}
+    imagePullSecrets: []
+
+    # ── decode.spec == the kustomize patch `spec:`, rendered VERBATIM ─────────
+    # GENERIC optimized-baseline model server (matches guides/optimized-baseline
+    # patch-vllm.yaml exactly): plain `vllm serve`, no kv-events. The llm-d-
+    # specific kv-events / precise-prefix-cache plumbing lives in an example
+    # overlay: examples/values-precise-prefix-cache.yaml.
+    #
+    # Model name single-sourced via the *model alias (serve arg + --served-model-name).
+    spec:
+      replicas: 8
+      template:
+        spec:
+          containers:
+            - name: modelserver
+              # NVIDIA GPU + vLLM uses vanilla vllm/vllm-openai (matches the
+              # optimized-baseline guide — there is NO llm-d-cuda image). For
+              # other targets switch to the llm-d image:
+              #   AMD  -> ghcr.io/llm-d/llm-d-rocm   Intel -> ghcr.io/llm-d/llm-d-xpu
+              #   CPU  -> ghcr.io/llm-d/llm-d-cpu
+              image: vllm/vllm-openai:v0.23.0
+              imagePullPolicy: IfNotPresent
+              command: ["vllm", "serve"]
+              args:
+                - *model
+                # The name clients pass as "model" — defaults to the model.
+                # Override by editing this value or appending in decode.extraArgs.
+                - --served-model-name
+                - *model
+                - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+                - --tensor-parallel-size=2
+              ports:
+                - name: modelserver
+                  containerPort: 8000
+                  protocol: TCP
+              env:
+                - name: DO_NOT_TRACK
+                  value: "1"
+                - name: USER
+                  value: llm-d
+                # How the model is pulled from HuggingFace.
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: *hfSecret
+                      key: HF_TOKEN
+              resources:
+                limits:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: 2
+                requests:
+                  cpu: "8"
+                  memory: 96Gi
+                  nvidia.com/gpu: 2
+              startupProbe:
+                httpGet: { path: /v1/models, port: modelserver }
+                initialDelaySeconds: 15
+                periodSeconds: 30
+                timeoutSeconds: 5
+                failureThreshold: 120
+              livenessProbe:
+                httpGet: { path: /health, port: modelserver }
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 3
+              readinessProbe:
+                httpGet: { path: /v1/models, port: modelserver }
+                periodSeconds: 5
+                timeoutSeconds: 2
+                failureThreshold: 3
+              volumeMounts:
+                - { name: shm, mountPath: /dev/shm }
+                - { name: cache, mountPath: /.cache }
+                - { name: triton-cache, mountPath: /.triton }
+                - { name: vllm-config, mountPath: /.config }
+          volumes:
+            - name: shm
+              emptyDir: { medium: Memory, sizeLimit: 20Gi }
+            - name: cache
+              emptyDir: {}
+            - name: triton-cache
+              emptyDir: {}
+            - name: vllm-config
+              emptyDir: {}
+
+  # Prometheus PodMonitor for decode — ON by default (matches the EPP
+  # ServiceMonitor). REQUIRES the Prometheus Operator (PodMonitor CRD).
+  monitoring:
+    podMonitor:
+      enabled: true
+
+  # KEDA autoscaling. The pristine chart REQUIRES eppServiceName (it cannot infer
+  # the router release). In this umbrella the EPP Service is <release>-epp, so set
+  # eppServiceName to "<your-release>-epp" when enabling autoscaling.
+  autoscaling:
+    keda:
+      enabled: false
+      eppServiceName: ""

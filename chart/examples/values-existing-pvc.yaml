@@ -1,0 +1,28 @@
+# Example: load weights from an EXISTING PVC (offline, no HF pull).
+#
+# Small override — layer it on top of the defaults (keeps the default model):
+#
+#   helm install my-llm-d . -n llm-d -f examples/values-existing-pvc.yaml
+#
+# Uses the modelserver's ADDITIVE knobs (extraEnv / extraVolumeMounts /
+# extraVolumes) so you don't restate decode.spec. The PVC must already exist in
+# the namespace; the chart never creates one.
+
+llm-d-modelserver:
+  # Weights come from the PVC — no HF token needed for the render sidecar either.
+  hfTokenSecret:
+    enabled: false
+  decode:
+    extraEnv:
+      - name: HF_HOME
+        value: /model-cache
+      - name: HF_HUB_OFFLINE      # never hit the network
+        value: "1"
+    extraVolumeMounts:
+      - name: model-cache
+        mountPath: /model-cache
+        readOnly: true
+    extraVolumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: my-model-pvc  # <-- your existing PVC

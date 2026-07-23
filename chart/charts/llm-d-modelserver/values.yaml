@@ -1,0 +1,255 @@
+# llm-d model servers — chart defaults.
+#
+# The `decode.spec` block below is shaped EXACTLY like the upstream kustomize
+# patch (guides/.../modelserver/gpu/vllm/base/patch-vllm.yaml) — it is the
+# Deployment's `spec:` and is rendered verbatim. The chart only injects what the
+# kustomize base + labels transformer inject: metadata, the guide labels
+# (InferencePool selector), the selector, the pod-template labels, and the
+# ServiceAccount. Everything else is yours, kustomize-style.
+#
+# Real configs come from the layered overlays, which mirror the patches:
+#   -f values/modelserver/base.values.yaml -f values/modelserver/gpu-vllm.yaml
+#
+# YOU are responsible (as with kustomize) for keeping these consistent with the
+# router config: the model name in `vllm serve <model>` and the kv-events topic,
+# --block-size, and the :5556 kv-events port.
+
+# ---- Labels injected by the chart (kustomize `labels` transformer) ----
+# The model name in the container args is separate (it lives in decode.spec);
+# this is only the short label form.
+model:
+  # Full model name — used by the render Service and the autoscaling query's
+  # model_name metric label. MUST match the model name in decode.spec args and
+  # in the router's token-producer modelName.
+  name: Qwen/Qwen3-32B
+  # Short form for the llm-d.ai/model label (no "/" allowed).
+  label: Qwen3-32B
+
+# InferencePool selector — must match the router's modelServers.matchLabels.
+# Also determines the render Service name (<guideLabel>-render).
+guideLabel: precise-prefix-cache-routing
+
+accelerator:
+  variant: gpu
+  vendor: nvidia
+
+# ---- ServiceAccount (kustomize base owns this) ----
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# HF token secret — referenced by the render Service below. For decode, put an
+# HF_TOKEN env in decode.spec directly (or omit for public models).
+hfTokenSecret:
+  # Set false for public models (render pod). Decode's HF_TOKEN, if needed,
+  # goes in decode.spec env directly.
+  enabled: true
+  name: llm-d-hf-token
+  key: HF_TOKEN
+
+# ---------------------------------------------------------------------------
+# decode.spec == patch-vllm.yaml `spec:`, verbatim.
+# ---------------------------------------------------------------------------
+decode:
+  enabled: true
+
+  # ---- Additive knobs: merged onto decode.spec below WITHOUT restating it ----
+  # Layer these from a separate -f file to customize the base overlay.
+  # Which container in decode.spec the extra* below target:
+  containerName: modelserver
+  extraArgs: []            # appended to that container's args
+  extraEnv: []             # appended to that container's env
+  extraVolumeMounts: []    # appended to that container's volumeMounts
+  extraVolumes: []         # appended to the pod's volumes
+  podLabels: {}            # added to the pod template labels
+  podAnnotations: {}       # added to the pod template annotations
+  deploymentAnnotations: {} # added to the Deployment's annotations
+  containerSecurityContext: {} # sets securityContext on the target container
+  podSecurityContext: {}       # sets pod-level securityContext
+  imagePullSecrets: []         # sets pod imagePullSecrets
+
+  # ---- The verbatim patch (== patch-vllm.yaml `spec:`) ----
+  spec:
+    replicas: 1
+    # strategy: {}                 # optional, e.g. Recreate
+    template:
+      # metadata:                  # optional extra pod labels/annotations
+      #   annotations: {}
+      #   labels: {}
+      spec:
+        containers:
+          - name: modelserver
+            image: vllm/vllm-openai:v0.23.0
+            imagePullPolicy: IfNotPresent
+            command: ["vllm", "serve"]
+            args:
+              - Qwen/Qwen3-32B
+              - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+              - --tensor-parallel-size=1
+              - --block-size=64
+              - --kv-events-config
+              - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@Qwen/Qwen3-32B"}'
+            ports:
+              - name: modelserver
+                containerPort: 8000
+                protocol: TCP
+              - name: kv-events
+                containerPort: 5556
+                protocol: TCP
+            env:
+              - name: NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.podIP
+              - name: POD_PORT
+                value: "8000"
+              - name: KV_EVENTS_ENDPOINT
+                value: "tcp://*:5556"
+              - name: DO_NOT_TRACK
+                value: "1"
+              - name: USER
+                value: llm-d
+            resources:
+              limits:
+                cpu: "16"
+                memory: 128Gi
+                nvidia.com/gpu: 2
+              requests:
+                cpu: "8"
+                memory: 96Gi
+                nvidia.com/gpu: 2
+            startupProbe:
+              httpGet:
+                path: /v1/models
+                port: modelserver
+              initialDelaySeconds: 15
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 120
+            livenessProbe:
+              httpGet:
+                path: /health
+                port: modelserver
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+            readinessProbe:
+              httpGet:
+                path: /v1/models
+                port: modelserver
+              periodSeconds: 5
+              timeoutSeconds: 2
+              failureThreshold: 3
+            volumeMounts:
+              - name: shm
+                mountPath: /dev/shm
+              - name: cache
+                mountPath: /.cache
+              - name: triton-cache
+                mountPath: /.triton
+              - name: vllm-config
+                mountPath: /.config
+        volumes:
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 20Gi
+          - name: cache
+            emptyDir: {}
+          - name: triton-cache
+            emptyDir: {}
+          - name: vllm-config
+            emptyDir: {}
+
+# ---------------------------------------------------------------------------
+# Standalone `vllm launch render` tokenizer Service. This is infra the chart
+# owns (there is no upstream "patch" for it — it is render/deployment.yaml), so
+# it stays structured. Disable it with the tokenizer-sidecar feature.
+# ---------------------------------------------------------------------------
+render:
+  # OFF by default — tokenization runs as an EPP sidecar (router chart default).
+  # Layer values/features/render-service.yaml to use a shared render Service.
+  enabled: false
+  replicas: 1
+  image:
+    repository: docker.io/vllm/vllm-openai-cpu
+    tag: v0.23.0
+    pullPolicy: IfNotPresent
+  port: 8000
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+  extraVolumes: []
+  extraVolumeMounts: []
+  annotations: {}
+  podLabels: {}
+  serviceAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  imagePullSecrets: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---- Prometheus PodMonitor for decode (separate resource) ----
+monitoring:
+  podMonitor:
+    enabled: false
+    interval: 30s
+    path: /metrics
+
+# ---- KEDA autoscaling (separate resource; see values/features/autoscaling-keda.yaml) ----
+autoscaling:
+  keda:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 8
+    pollingInterval: 15
+    cooldownPeriod: 300
+    eppServiceName: ""
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+      scaleDown:
+        stabilizationWindowSeconds: 300
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+    prometheus:
+      serverAddress: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+      auth:
+        enabled: false
+        name: keda-prometheus-auth
+        create: true
+        secretTargetRef:
+          - parameter: ca
+            name: keda-prometheus-auth
+            key: ca.crt
+    triggers:
+      - name: epp-running-requests
+        enabled: true
+        metricType: AverageValue
+        query: >-
+          sum(llm_d_epp_request_running{namespace="{{ .Release.Namespace }}",service="{{ .eppService }}",model_name="{{ .Values.model.name }}"})
+        threshold: "16"
+      - name: epp-queue-size
+        enabled: false
+        metricType: AverageValue
+        query: >-
+          sum(llm_d_epp_flow_control_queue_size{namespace="{{ .Release.Namespace }}",service="{{ .eppService }}",model_name="{{ .Values.model.name }}"})
+        threshold: "1"

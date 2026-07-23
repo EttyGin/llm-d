@@ -1,0 +1,69 @@
+{{- if .Values.autoscaling.keda.enabled }}
+{{- $k := .Values.autoscaling.keda }}
+{{- $prom := $k.prometheus }}
+{{- $auth := $prom.auth }}
+{{- /*
+  The EPP Service is named <router release>-epp by the upstream chart — NOT
+  from the guide label. This chart has no way to know the router's release
+  name, so it must be given explicitly.
+*/ -}}
+{{- $eppSvc := $k.eppServiceName -}}
+{{- if not $eppSvc -}}
+{{- fail "autoscaling.keda.eppServiceName is required: set it to the router release name + \"-epp\" (e.g. ppc-epp). The EPP Service is named after the ROUTER release, which this chart cannot infer." -}}
+{{- end -}}
+{{- if and $auth.enabled $auth.create }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ $auth.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-modelserver.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    {{- toYaml $auth.secretTargetRef | nindent 4 }}
+---
+{{- end }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "llm-d-modelserver.name" . }}-decode
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-modelserver.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "llm-d-modelserver.name" . }}-decode
+  pollingInterval: {{ $k.pollingInterval }}
+  # Applies to scale-to-zero. The generated HPA behavior below controls
+  # ordinary scale-down while minReplicaCount is 1 or greater.
+  cooldownPeriod: {{ $k.cooldownPeriod }}
+  minReplicaCount: {{ $k.minReplicas }}
+  maxReplicaCount: {{ $k.maxReplicas }}
+  {{- with $k.behavior }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      name: keda-hpa-{{ include "llm-d-modelserver.name" $ }}
+      behavior:
+        {{- toYaml . | nindent 8 }}
+  {{- end }}
+  triggers:
+  {{- range $k.triggers }}
+  {{- if .enabled }}
+    - type: prometheus
+      name: {{ .name }}
+      metricType: {{ .metricType | default "AverageValue" }}
+      metadata:
+        serverAddress: {{ $prom.serverAddress | quote }}
+        query: >-
+          {{ tpl .query (dict "Values" $.Values "Release" $.Release "eppService" $eppSvc "Template" $.Template) }}
+        threshold: {{ .threshold | quote }}
+      {{- if $auth.enabled }}
+      authenticationRef:
+        name: {{ $auth.name }}
+      {{- end }}
+  {{- end }}
+  {{- end }}
+{{- end }}

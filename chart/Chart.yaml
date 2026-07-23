@@ -1,0 +1,25 @@
+apiVersion: v2
+name: llm-d
+description: >-
+  Umbrella (wrapper) chart for llm-d: Router (EPP) + model servers, wired
+  together from a single identity block. Set the model name, gateway name, and
+  guide label ONCE and they fan out to both subcharts (vLLM serve arg + kv-events
+  topic, router tokenizer, HTTPRoute, InferencePool selector). The Gateway is NOT
+  managed here — deploy it separately and reference it by name. Defaults to the
+  production-shaped `optimized-baseline` guide.
+type: application
+version: 0.8.1
+appVersion: v0.9.0
+
+dependencies:
+  # llm-d Router (EPP) in Gateway mode. Thin passthrough over the official
+  # OCI llm-d-router-gateway chart (vendored under its own charts/). Untouched.
+  - name: llm-d-router
+    version: 0.8.1
+    repository: file://charts/llm-d-router
+
+  # vLLM/SGLang model servers + optional render tokenizer Service. Untouched —
+  # decode.spec is authored (verbatim) from this umbrella's values.
+  - name: llm-d-modelserver
+    version: 0.8.1
+    repository: file://charts/llm-d-modelserver

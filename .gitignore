@@ -15,5 +15,11 @@ CLAUDE.md
 # helm chart directories via kustomize
 **/charts/
 
+# ...except the umbrella chart's vendored subcharts, which ARE source.
+!chart/charts/
+!chart/charts/**
+!chart/charts/**/charts/
+!chart/charts/**/charts/**
+
 # AI
 .claude

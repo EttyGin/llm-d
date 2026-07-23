@@ -1,0 +1,80 @@
+{{- if .Values.decode.enabled }}
+{{- $d := .Values.decode }}
+{{- /*
+  The chart owns ONLY what the upstream kustomize base + labels transformer own:
+  metadata, the guide labels (InferencePool selector), the selector, the pod
+  template labels, and the ServiceAccount. `decode.spec` is YOUR patch — laid
+  out exactly like patch-vllm.yaml's `spec:` block, rendered VERBATIM.
+
+  ADDITIVE knobs let you add common things WITHOUT restating the whole spec, by
+  layering a separate -f file. They merge onto decode.spec:
+    decode.extraArgs / extraEnv / extraVolumeMounts  -> appended to the
+        container named decode.containerName (default "modelserver")
+    decode.extraVolumes                              -> appended to pod volumes
+    decode.podAnnotations                            -> pod template annotations
+    decode.deploymentAnnotations                     -> Deployment annotations
+  An existing ServiceAccount is set via serviceAccount.create/name (no spec edit).
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-d-modelserver.name" . }}-decode
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-modelserver.labels" . | nindent 4 }}
+    {{- include "llm-d-modelserver.decodeSelectorLabels" . | nindent 4 }}
+  {{- with $d.deploymentAnnotations }}
+  annotations:
+    {{- range $k, $v := . }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+  {{- end }}
+spec:
+  replicas: {{ dig "spec" "replicas" 1 $d }}
+  selector:
+    matchLabels:
+      {{- include "llm-d-modelserver.decodeSelectorLabels" . | nindent 6 }}
+  {{- with dig "spec" "strategy" dict $d }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "llm-d-modelserver.decodeSelectorLabels" . | nindent 8 }}
+        {{- with dig "spec" "template" "metadata" "labels" dict $d }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with $d.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- $podAnn := merge (dict) ($d.podAnnotations | default dict) (dig "spec" "template" "metadata" "annotations" dict $d) }}
+      {{- with $podAnn }}
+      annotations:
+        {{- range $k, $v := . }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+      {{- end }}
+    spec:
+      # Chart-injected (kustomize base owns this). Override by putting
+      # serviceAccountName in decode.spec.template.spec.
+      serviceAccountName: {{ include "llm-d-modelserver.serviceAccountName" . }}
+      {{- /* Start from your verbatim patch spec, then fold in the additive knobs. */}}
+      {{- $ps := omit (deepCopy (dig "spec" "template" "spec" dict $d)) "serviceAccountName" }}
+      {{- $cname := $d.containerName | default "modelserver" }}
+      {{- $containers := list }}
+      {{- range $c := ($ps.containers | default list) }}
+        {{- if eq ($c.name | default "") $cname }}
+          {{- with $d.extraArgs }}{{- $_ := set $c "args" (concat ($c.args | default list) .) }}{{- end }}
+          {{- with $d.extraEnv }}{{- $_ := set $c "env" (concat ($c.env | default list) .) }}{{- end }}
+          {{- with $d.extraVolumeMounts }}{{- $_ := set $c "volumeMounts" (concat ($c.volumeMounts | default list) .) }}{{- end }}
+          {{- with $d.containerSecurityContext }}{{- $_ := set $c "securityContext" . }}{{- end }}
+        {{- end }}
+        {{- $containers = append $containers $c }}
+      {{- end }}
+      {{- $_ := set $ps "containers" $containers }}
+      {{- with $d.extraVolumes }}{{- $_ := set $ps "volumes" (concat ($ps.volumes | default list) .) }}{{- end }}
+      {{- with $d.podSecurityContext }}{{- $_ := set $ps "securityContext" . }}{{- end }}
+      {{- with $d.imagePullSecrets }}{{- $_ := set $ps "imagePullSecrets" . }}{{- end }}
+      {{- $ps | toYaml | nindent 6 }}
+{{- end }}

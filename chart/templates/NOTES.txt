@@ -1,0 +1,31 @@
+llm-d is deploying — Router (EPP) + model servers, wired from a single identity block.
+
+  Model:    {{ .Values.identity.model }}
+  Guide:    {{ .Values.identity.guide }}
+  Gateway:  {{ .Values.identity.gateway }}   (must already exist — NOT created by this chart)
+  EPP:      {{ .Release.Name }}-epp   (Service in namespace {{ .Release.Namespace }})
+
+Check rollout:
+
+  kubectl -n {{ .Release.Namespace }} get deploy,po,svc,httproute,inferencepool
+
+Send a test request (Gateway mode):
+
+  IP=$(kubectl -n {{ .Release.Namespace }} get gateway {{ .Values.identity.gateway }} -o jsonpath='{.status.addresses[0].value}')
+  kubectl -n {{ .Release.Namespace }} run curl-debug --rm -it --image=cfmanteiga/alpine-bash-curl-jq -- \
+    curl -sS -X POST http://$IP/v1/completions \
+      -H 'Content-Type: application/json' \
+      -d '{"model": "{{ .Values.identity.model }}", "prompt": "How are you today?"}' | jq
+
+Prerequisites (must exist before install):
+  - A Gateway named "{{ .Values.identity.gateway }}" (deploy the gateway separately),
+    plus the Gateway API + GAIE CRDs and the `istio` GatewayClass.
+  - Secret `{{ index .Values "llm-d-modelserver" "hfTokenSecret" "name" }}` with key HF_TOKEN
+    (unless using a public/offline model).
+  - The Prometheus Operator (ServiceMonitor/PodMonitor CRDs) — metrics are ON by
+    default. If it is not installed, set
+    llm-d-router.llmd.router.monitoring.prometheus.enabled=false and
+    llm-d-modelserver.monitoring.podMonitor.enabled=false.
+
+To change the model, gateway, or guide: edit the `identity:` block in your values
+file and `helm upgrade` — it fans out to both components automatically.

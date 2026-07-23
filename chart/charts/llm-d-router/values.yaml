@@ -1,0 +1,111 @@
+# llm-d Router — chart defaults.
+#
+# This chart is a THIN WRAPPER over the official llm-d chart:
+#   oci://ghcr.io/llm-d/charts/llm-d-router-gateway  (see Chart.yaml)
+#
+# It adds NO templates of its own. Everything under `llmd:` is passed straight
+# through to the official subchart, so these values mirror the upstream chart's
+# own value hierarchy exactly — just nested one level under `llmd:` (the
+# dependency alias). The EPP configuration is supplied the upstream way, via
+# `llmd.router.epp.pluginsCustomConfig`, identical in shape to the values files
+# under guides/<path>/router/*.values.yaml in the llm-d repo.
+#
+# To move to a new upstream release: bump `version` in Chart.yaml, `make deps`.
+# To update a guide config: copy the upstream guide's `router:` block into the
+# matching file under values/guides/, nested under `llmd:`.
+#
+# Real configuration comes from the layered values tree:
+#   helm install ppc charts/llm-d-router \
+#     -f values/base.values.yaml \
+#     -f values/guides/precise-prefix-cache-routing.yaml \
+#     -f values/features/httproute-flags.yaml \
+#     -n $NAMESPACE
+
+# ---------------------------------------------------------------------------
+# Passed through verbatim to oci://ghcr.io/llm-d/charts/llm-d-router-gateway.
+# Keys and nesting match that chart's own values.yaml.
+# ---------------------------------------------------------------------------
+llmd:
+  provider:
+    name: istio # none | istio | gke
+    istio:
+      destinationRule:
+        host: ""
+        trafficPolicy: {}
+
+  httpRoute:
+    # Enabled by values/features/httproute-flags.yaml (Gateway mode).
+    create: false
+    inferenceGatewayName: llm-d-inference-gateway
+    inferenceGatewayNamespace: ""
+    requestTimeout: "300s"
+
+  router:
+    modelServers:
+      type: vllm
+      protocol: http
+      targetPorts:
+        - number: 8000
+      # Placeholder so the chart renders standalone; the guide overlay is
+      # authoritative.
+      matchLabels:
+        llm-d.ai/guide: "precise-prefix-cache-routing"
+
+    inferencePool:
+      create: true
+      failureMode: "FailOpen"
+
+    inferenceObjectives: []
+
+    epp:
+      image:
+        registry: ghcr.io/llm-d
+        repository: llm-d-router-endpoint-picker
+        tag: v0.9.0
+        pullPolicy: IfNotPresent
+
+      replicas: 1
+
+      # Stock upstream default. A guide overlay selects its own config file and
+      # supplies it under pluginsCustomConfig (the upstream mechanism).
+      pluginsConfigFile: "default-plugins.yaml"
+      pluginsCustomConfig: {}
+
+    # Tokenizer runs as a SIDECAR in the EPP pod by default (loopback). The
+    # EPP token-producer dials it at http://localhost:8000 (see the guide
+    # configs). To use a shared render Service instead, layer
+    # values/features/render-service.yaml (sets enabled: false here and
+    # deploys the Service from the modelserver chart).
+    tokenizer:
+      enabled: true
+      # Must match the model the servers serve and the token-producer modelName.
+      modelName: Qwen/Qwen3-32B
+      image:
+        registry: docker.io
+        # GPU-less: `vllm launch render` only tokenizes. Pinned to the same
+        # vLLM release the model servers run.
+        repository: vllm/vllm-openai-cpu
+        tag: v0.23.0
+        pullPolicy: IfNotPresent
+      port: 8000
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+
+    # Gateway mode: the Gateway's proxy handles the data plane.
+    proxy:
+      enabled: false
+
+    monitoring:
+      interval: "10s"
+      prometheus:
+        enabled: false
+        auth:
+          enabled: true
+
+    tracing:
+      enabled: false
+
+    latencyPredictor:
+      enabled: false
