@@ -1,0 +1,3 @@
+{{- if .Values.prefill.enabled }}
+{{- include "llm-d-modelserver.serverDeployment" (dict "root" $ "role" "prefill" "cfg" .Values.prefill) }}
+{{- end }}

@@ -14,16 +14,23 @@ modelserver charts be installed under different release names.
 {{- end -}}
 
 {{/*
-Selector labels for the decode pods. `llm-d.ai/guide` is what the router's
-InferencePool selects on, so it must appear on the pod template AND the
-Deployment selector.
+Selector labels for a role's pods, parameterized by role ("decode" / "prefill").
+`llm-d.ai/role` is how the EPP's prefill-filter/decode-filter split traffic, and
+`llm-d.ai/guide` is what the router's InferencePool selects on — so these must
+appear on the pod template AND the Deployment selector, kept identical (a role
+can never half-apply). Call as: (dict "root" $ "role" "decode").
 */}}
+{{- define "llm-d-modelserver.roleSelectorLabels" -}}
+llm-d.ai/role: {{ .role }}
+llm-d.ai/guide: {{ .root.Values.guideLabel | quote }}
+llm-d.ai/model: {{ .root.Values.model.label | quote }}
+llm-d.ai/accelerator-variant: {{ .root.Values.accelerator.variant | quote }}
+llm-d.ai/accelerator-vendor: {{ .root.Values.accelerator.vendor | quote }}
+{{- end -}}
+
+{{/* Back-compat alias — decode pods. Same output as roleSelectorLabels role=decode. */}}
 {{- define "llm-d-modelserver.decodeSelectorLabels" -}}
-llm-d.ai/role: decode
-llm-d.ai/guide: {{ .Values.guideLabel | quote }}
-llm-d.ai/model: {{ .Values.model.label | quote }}
-llm-d.ai/accelerator-variant: {{ .Values.accelerator.variant | quote }}
-llm-d.ai/accelerator-vendor: {{ .Values.accelerator.vendor | quote }}
+{{- include "llm-d-modelserver.roleSelectorLabels" (dict "root" . "role" "decode") -}}
 {{- end -}}
 
 {{/* Common metadata labels. */}}

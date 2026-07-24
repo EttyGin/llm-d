@@ -1,44 +1,174 @@
 # =============================================================================
-# Reproduces the ROUTER side of guides/pd-disaggregation (prefill/decode split).
+# Reproduces guides/pd-disaggregation (prefill/decode disaggregation) on the
+# umbrella chart. Model: openai/gpt-oss-120b (prefill TP=1, decode TP=4).
 #
 #   helm install my-llm-d . -n <ns> -f examples/values-pd-disaggregation.yaml
 #
-# ⚠ IMPORTANT — this chart deploys the PD-aware ROUTER only, NOT the PD model
-#   servers. P/D disaggregation needs TWO model-server Deployments (a prefill
-#   role AND a decode role) plus a routing-proxy sidecar on the decode pod. The
-#   llm-d-modelserver subchart models only a single `decode` role (one
-#   Deployment, hardcoded llm-d.ai/role: decode, no sidecar), and it is left
-#   untouched — so the prefill+decode+sidecar servers CANNOT be produced here.
+# HOW P/D WORKS (see docs/architecture/advanced/disaggregation): the EPP picks a
+# (prefill, decode) pair; a routing-proxy SIDECAR in the decode pod runs the
+# prefill first (max_tokens=1), then the decode pulls the KV cache from prefill
+# over NIXL/RDMA. Both roles sit in one InferencePool; the EPP splits them by the
+# llm-d.ai/role label via prefill-filter / decode-filter.
 #
-#   Deploy the model servers from the guide's kustomize instead:
-#     export NAMESPACE=<ns> INFRA_PROVIDER=base
-#     kubectl apply -n $NAMESPACE \
-#       -k $REPO_ROOT/guides/pd-disaggregation/modelserver/gpu/vllm/$INFRA_PROVIDER
-#   They carry llm-d.ai/guide: pd-disaggregation, which the EPP below selects; the
-#   EPP then splits traffic across roles via the prefill-filter / decode-filter.
+# ⚠ ENABLING PREFILL MUTATES THE DECODE POD. Decode below gains: the routing-
+#   proxy sidecar (initContainer, restartPolicy: Always), a vLLM port shift to
+#   --port=8200 (sidecar owns 8000), the `nixl` port, and the NIXL kv-transfer
+#   config + VLLM_NIXL_SIDE_CHANNEL_HOST. The umbrella validation fails fast if
+#   any of that is missing while prefill.enabled is true.
 #
-# Accordingly this file disables the chart's decode server (decode.enabled:false)
-# so it doesn't deploy a lone non-PD decode. Model: openai/gpt-oss-120b.
+# PRODUCTION: needs an RDMA interconnect (IB/RoCE). Without it, NIXL falls back
+# to TCP — dev/test only.
 # =============================================================================
 
-# The chart does not create the PD model servers (see header) — disable decode.
+_pd:
+  model:        &model        openai/gpt-oss-120b
+  modelLabel:   &modelLabel   gpt-oss-120b
+  # vLLM tag — shared by prefill + decode engine images (GPU vllm-openai). The
+  # standard PD guide uses vanilla vllm/vllm-openai, same track as vllmVersion.
+  # (If you hit NIXL/UCX issues (#545) and need ghcr.io/llm-d/llm-d-cuda, that is
+  #  a SEPARATE version track — set decode.image/prefill.image explicitly then.)
+  vllmTag:      &vllmTag      v0.23.0
+  # Routing-proxy sidecar — a THIRD image on its OWN version track (NOT vLLM).
+  # Pinned and named here so it's visible, not buried in decode.spec.
+  sidecarImage: &sidecarImage ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.9.0
+
 llm-d-modelserver:
+  model:
+    name: *model
+    label: *modelLabel
+  guideLabel: pd-disaggregation
+
+  # ---- Prefill role (P) ----
+  prefill:
+    enabled: true
+    image: { repository: vllm/vllm-openai, tag: *vllmTag }
+    spec:
+      replicas: 8
+      template:
+        spec:
+          containers:
+            - name: modelserver
+              command: ["vllm", "serve"]
+              args:
+                - *model
+                - --served-model-name
+                - *model
+                - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+                - --tensor-parallel-size=1
+                - --block-size=128
+                - --kv-transfer-config
+                - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                - --no-disable-hybrid-kv-cache-manager
+              env:
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef: { name: llm-d-hf-token, key: HF_TOKEN }
+                - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+                  valueFrom:
+                    fieldRef: { fieldPath: status.podIP }
+                # vLLM keep-alive must be >= sidecar idle timeout (90s).
+                - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+                  value: "120"
+              ports:
+                - { name: modelserver, containerPort: 8000, protocol: TCP }
+                - { name: nixl, containerPort: 5600, protocol: TCP }
+              resources:
+                limits:   { cpu: "8", memory: 16Gi, nvidia.com/gpu: "1" }
+                requests: { cpu: "8", memory: 16Gi, nvidia.com/gpu: "1" }
+              volumeMounts:
+                - { name: shm, mountPath: /dev/shm }
+                - { name: cache, mountPath: /.cache }
+                - { name: vllm-config, mountPath: /.config }
+                - { name: triton-cache, mountPath: /.triton }
+          volumes:
+            - name: shm
+              emptyDir: { medium: Memory, sizeLimit: 20Gi }
+            - name: cache
+              emptyDir: {}
+            - name: vllm-config
+              emptyDir: {}
+            - name: triton-cache
+              emptyDir: {}
+
+  # ---- Decode role (D) — mutated for P/D: sidecar + port 8200 + nixl + NIXL ----
   decode:
-    enabled: false
+    enabled: true
+    image: { repository: vllm/vllm-openai, tag: *vllmTag }
+    spec:
+      replicas: 2
+      template:
+        spec:
+          initContainers:
+            # Routing-proxy sidecar (native sidecar: initContainer + Always).
+            - name: routing-proxy
+              image: *sidecarImage
+              imagePullPolicy: Always
+              restartPolicy: Always
+              args:
+                - --port=8000
+                - --vllm-port=8200
+                - --kv-connector=nixlv2
+                - --zap-log-level=1
+                - --secure-proxy=false
+              ports:
+                - { name: sidecar, containerPort: 8000, protocol: TCP }
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+          containers:
+            - name: modelserver
+              command: ["vllm", "serve"]
+              args:
+                - *model
+                - --served-model-name
+                - *model
+                - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+                - --tensor-parallel-size=4
+                - --block-size=128
+                - --kv-transfer-config
+                - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                - --no-disable-hybrid-kv-cache-manager
+                # Port shift: the sidecar owns 8000, vLLM moves to 8200.
+                - --port=8200
+              env:
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef: { name: llm-d-hf-token, key: HF_TOKEN }
+                - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+                  valueFrom:
+                    fieldRef: { fieldPath: status.podIP }
+              ports:
+                - { name: modelserver, containerPort: 8200, protocol: TCP }
+                - { name: nixl, containerPort: 5600, protocol: TCP }
+              resources:
+                limits:   { cpu: "16", memory: 64Gi, nvidia.com/gpu: "4" }
+                requests: { cpu: "16", memory: 64Gi, nvidia.com/gpu: "4" }
+              volumeMounts:
+                - { name: shm, mountPath: /dev/shm }
+                - { name: cache, mountPath: /.cache }
+                - { name: vllm-config, mountPath: /.config }
+                - { name: triton-cache, mountPath: /.triton }
+          volumes:
+            - name: shm
+              emptyDir: { medium: Memory, sizeLimit: 20Gi }
+            - name: cache
+              emptyDir: {}
+            - name: vllm-config
+              emptyDir: {}
+            - name: triton-cache
+              emptyDir: {}
 
 llm-d-router:
   llmd:
     router:
-      # Tokenizer sidecar (prefix-cache-scorer tokenizes requests).
+      # Prefix-cache-scorer tokenizes requests → tokenizer sidecar on.
       tokenizer:
         enabled: true
-        modelName: openai/gpt-oss-120b
-
-      # Selects BOTH prefill and decode pods deployed by the guide's kustomize.
+        modelName: *model
+      # One InferencePool selects both roles by guide; the EPP splits by role.
       modelServers:
         matchLabels:
           llm-d.ai/guide: "pd-disaggregation"
-
       epp:
         pluginsConfigFile: "pd-config.yaml"
         pluginsCustomConfig:

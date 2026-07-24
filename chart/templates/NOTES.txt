@@ -27,5 +27,15 @@ Prerequisites (must exist before install):
     llm-d-router.llmd.router.monitoring.prometheus.enabled=false and
     llm-d-modelserver.monitoring.podMonitor.enabled=false.
 
+{{- if dig "prefill" "enabled" false (index .Values "llm-d-modelserver" | default dict) }}
+
+⚠ P/D DISAGGREGATION IS ON (prefill.enabled=true).
+  This deploys TWO model-server roles — {{ .Release.Name }}-prefill and
+  {{ .Release.Name }}-decode — and the DECODE pod is mutated: it runs the
+  routing-proxy sidecar, vLLM is shifted to port 8200, and NIXL kv-transfer is
+  configured. Both roles are one InferencePool; the EPP splits them by
+  llm-d.ai/role. Production needs an RDMA (IB/RoCE) interconnect for KV transfer.
+{{- end }}
+
 To change the model, gateway, or guide: edit the `identity:` block in your values
 file and `helm upgrade` — it fans out to both components automatically.

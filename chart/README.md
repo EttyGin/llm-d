@@ -125,13 +125,27 @@ everywhere) plus `decode.spec` args/resources for the new TP/GPU count, and
 install with your copy as `-f`. Helm replaces list values, so args and resources
 are edited there in place, not layered.
 
+## P/D disaggregation
+
+Full prefill/decode disaggregation is supported. `prefill.enabled: false` by
+default (renders nothing; decode is byte-identical when off). Prefill is the
+**same Deployment shape** as decode — same knobs (`spec`, `image`, `extraArgs`,
+`extraEnv`, volumes, securityContext, annotations, …), rendered by one shared
+template partial with the `llm-d.ai/role` label as the only parameter (kept
+consistent across selector + pod labels).
+
+Enabling prefill is **P/D mode and it mutates the decode pod** — decode gains the
+routing-proxy sidecar, a vLLM port shift to `8200`, the `nixl` port, and NIXL
+kv-transfer config. The validation **fails fast** if `prefill.enabled` is true
+while `decode.spec` lacks the sidecar or the port shift. See
+`examples/values-pd-disaggregation.yaml`. The sidecar image is a third image on
+its own version track (pinned separately, not `vllmVersion`). Prometheus metrics
+extend to prefill (a role-aware PodMonitor); **prefill autoscaling** is left to
+WVA / a hand-authored trigger (the chart's KEDA ScaledObject stays decode-only —
+see the note in `values.yaml`). Production needs an RDMA (IB/RoCE) interconnect.
+
 ## Caveats
 
-- **P/D disaggregation is router-only here.** It needs separate prefill + decode
-  Deployments and a routing-proxy sidecar; the `llm-d-modelserver` subchart models
-  only a single `decode` role and is left untouched, so the PD model servers must
-  come from the guide's kustomize. The overlay deploys the PD-aware EPP and sets
-  `decode.enabled: false`.
 - **KEDA `eppServiceName`** is required when autoscaling is on — the modelserver
   chart can't infer the router release, so set it to `<release>-epp`.
 - **EPP RBAC**: the router is a pure passthrough over the upstream OCI

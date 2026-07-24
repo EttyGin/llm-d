@@ -173,6 +173,57 @@ decode:
             emptyDir: {}
 
 # ---------------------------------------------------------------------------
+# prefill — the P role for P/D disaggregation. OFF by default. It is the SAME
+# Deployment shape as decode (rendered by the same template partial), so it has
+# EVERY decode knob with the same names/shape: spec (verbatim), image (override),
+# extraArgs/extraEnv/extraVolumeMounts/extraVolumes, podLabels/podAnnotations/
+# deploymentAnnotations, containerSecurityContext/podSecurityContext,
+# imagePullSecrets. Replicas/resources/parallelism live in prefill.spec, exactly
+# like decode.spec; PVC via extraVolumes+extraVolumeMounts; the ServiceAccount is
+# the shared serviceAccount.* above.
+#
+# ⚠ ENABLING PREFILL IS P/D MODE, AND IT MUTATES THE DECODE POD. In P/D the
+#   decode pod must ALSO gain: the routing-proxy sidecar, a vLLM port shift to
+#   8200, the `nixl` port, and the NIXL kv-transfer config/env. Those live in
+#   YOUR decode.spec — see examples/values-pd-disaggregation.yaml. The umbrella's
+#   validation fails fast if prefill.enabled is true while decode.spec is missing
+#   the sidecar or the port shift.
+# ---------------------------------------------------------------------------
+prefill:
+  enabled: false
+
+  # Same additive extension surface as decode.
+  containerName: modelserver
+  extraArgs: []
+  extraEnv: []
+  extraVolumeMounts: []
+  extraVolumes: []
+  podLabels: {}
+  podAnnotations: {}
+  deploymentAnnotations: {}
+  containerSecurityContext: {}
+  podSecurityContext: {}
+  imagePullSecrets: []
+  image: {}                    # e.g. { repository: vllm/vllm-openai, tag: v0.23.0 }
+
+  # Lean placeholder spec — provide the real P/D prefill spec (NIXL kv-transfer
+  # config, VLLM_NIXL_SIDE_CHANNEL_HOST, the nixl port) via your values; the PD
+  # example does this. Same verbatim-`spec` contract as decode.
+  spec:
+    replicas: 1
+    template:
+      spec:
+        containers:
+          - name: modelserver
+            imagePullPolicy: IfNotPresent
+            command: ["vllm", "serve"]
+            args: []
+            ports:
+              - name: modelserver
+                containerPort: 8000
+                protocol: TCP
+
+# ---------------------------------------------------------------------------
 # Standalone `vllm launch render` tokenizer Service. This is infra the chart
 # owns (there is no upstream "patch" for it — it is render/deployment.yaml), so
 # it stays structured. Disable it with the tokenizer-sidecar feature.

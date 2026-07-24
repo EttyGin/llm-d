@@ -15,3 +15,29 @@ runtime. Keep this file free of any real Kubernetes output.
 {{- if and $keda.enabled (not $keda.eppServiceName) }}
 {{- fail "llm-d-modelserver.autoscaling.keda.eppServiceName is required when autoscaling is enabled: set it to \"<release>-epp\" (the router shares this umbrella's release name)." }}
 {{- end }}
+{{- /*
+  P/D mode: enabling prefill MUTATES the decode pod — it must gain the routing-
+  proxy sidecar and a vLLM port shift (8000 -> 8200 behind the sidecar). Fail
+  fast if decode.spec is missing either, so this can't half-deploy at runtime.
+*/ -}}
+{{- if dig "prefill" "enabled" false $ms }}
+{{- $decodeSpec := dig "decode" "spec" "template" "spec" dict $ms -}}
+{{- $hasSidecar := false -}}
+{{- range $ic := ($decodeSpec.initContainers | default list) }}
+  {{- if or (eq ($ic.restartPolicy | default "") "Always") (contains "proxy" ($ic.name | default "")) (contains "sidecar" ($ic.name | default "")) }}{{- $hasSidecar = true }}{{- end }}
+{{- end }}
+{{- $cname := dig "decode" "containerName" "modelserver" $ms -}}
+{{- $args := list -}}
+{{- range $c := ($decodeSpec.containers | default list) }}
+  {{- if eq ($c.name | default "") $cname }}{{- $args = concat $args ($c.args | default list) }}{{- end }}
+{{- end }}
+{{- $args = concat $args (dig "decode" "extraArgs" list $ms) -}}
+{{- $hasPortShift := false -}}
+{{- range $a := $args }}{{- if hasPrefix "--port" (toString $a) }}{{- $hasPortShift = true }}{{- end }}{{- end }}
+{{- if not $hasSidecar }}
+{{- fail "llm-d-modelserver.prefill.enabled is true (P/D mode) but decode.spec has NO routing-proxy sidecar. Add the sidecar (a native initContainer, restartPolicy: Always) to llm-d-modelserver.decode.spec — see examples/values-pd-disaggregation.yaml." }}
+{{- end }}
+{{- if not $hasPortShift }}
+{{- fail "llm-d-modelserver.prefill.enabled is true (P/D mode) but decode's vLLM has no port shift. The decode engine must move to --port=8200 (the sidecar listens on 8000). Add it to decode.spec args or decode.extraArgs — see examples/values-pd-disaggregation.yaml." }}
+{{- end }}
+{{- end }}
