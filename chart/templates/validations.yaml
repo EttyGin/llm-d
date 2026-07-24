@@ -75,3 +75,19 @@ runtime. Keep this file free of any real Kubernetes output.
 {{- fail (printf "block-size MISMATCH: pluginsCustomConfig blockSize=%s but decode --block-size=%s. They MUST be equal for precise prefix-cache routing (the EPP KV-block index would misalign with vLLM's blocks)." $pluginBS $argBS) }}
 {{- end }}
 {{- end }}
+{{- /*
+  modelName consistency: an EPP token-producer's `modelName` MUST equal the model
+  the servers actually serve (llm-d-modelserver.model.name) — it tokenizes for
+  that model. Same opaque-plugin-string problem as block-size, so verify here.
+*/ -}}
+{{- $msModel := dig "model" "name" "" $ms -}}
+{{- if $msModel }}
+{{- range $file, $content := $pcc }}
+  {{- range $m := regexFindAll "modelName:[ ]*[^ \n]+" (toString $content) -1 }}
+    {{- $pm := $m | trimPrefix "modelName:" | trim | trimAll "\"'" -}}
+    {{- if and $pm (ne $pm $msModel) }}
+    {{- fail (printf "modelName MISMATCH: pluginsCustomConfig has modelName=%s but the model server serves %s (llm-d-modelserver.model.name). The token-producer modelName MUST equal the deployed model." $pm $msModel) }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}
