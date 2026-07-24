@@ -10,8 +10,9 @@ prefix cache, P/D) are opt-in overlays.
 > **The Gateway is not managed here.** Deploy it separately (e.g. the standalone
 > `llm-d-gateway` chart) and put its name in `identity.gateway` — the router's
 > `HTTPRoute` binds to it. Only the **router** and **modelserver** subcharts are
-> wrapped, and **neither subchart is modified** — this umbrella only feeds them
-> values.
+> wrapped: the **router is a pure passthrough** (never modified); the
+> **modelserver** carries a few small additive extensions (an image-tag override
+> and P/D prefill support). Everything else is driven by values.
 
 ## Layout
 
@@ -25,20 +26,21 @@ chart/
 ├── examples/                  # copy-paste overlays
 └── charts/
     ├── llm-d-router/          # thin passthrough → OCI llm-d-router-gateway (untouched)
-    └── llm-d-modelserver/     # vLLM model servers (untouched; decode.spec authored via values)
+    └── llm-d-modelserver/     # vLLM model servers, decode + prefill (spec authored via values)
 ```
 
-## Single source of truth (no chart edits)
+## Single source of truth
 
 Edit the `identity:` block at the top of `values.yaml` **once**. Each field is a
 YAML anchor referenced throughout the file:
 
-| You set (once)      | Fans out to                                                                     |
-| ------------------- | ------------------------------------------------------------------------------- |
-| `identity.model`    | vLLM `serve` arg · `--served-model-name` · router tokenizer · autoscaling query |
-| `identity.modelLabel` | the `llm-d.ai/model` pod label · InferencePool `matchLabels`                   |
-| `identity.guide`    | model server pod labels · the router `InferencePool` selector                   |
-| `identity.gateway`  | the router `HTTPRoute` parentRef (a Gateway you deployed separately)            |
+| You set (once)        | Fans out to                                                                     |
+| --------------------- | ------------------------------------------------------------------------------- |
+| `identity.model`      | vLLM `serve` arg · `--served-model-name` · router tokenizer · autoscaling query |
+| `identity.modelLabel` | the `llm-d.ai/model` pod label · InferencePool `matchLabels`                     |
+| `identity.guide`      | model server pod labels · the router `InferencePool` selector                   |
+| `identity.gateway`    | the router `HTTPRoute` parentRef (a Gateway you deployed separately)             |
+| `identity.vllmVersion`| the **tag** on all three vLLM images (decode / tokenizer / render) — repositories stay different |
 
 **How the model name reaches the vLLM args without touching the chart:** the
 `decode.spec` is authored in this umbrella's values (the modelserver renders it
@@ -78,7 +80,7 @@ tokenizer sidecar. Upgrade to smarter routing with an overlay:
 
 - `examples/values-optimized-baseline.yaml` — prefix-cache-affinity (approx, no kv-events).
 - `examples/values-precise-prefix-cache-routing.yaml` — exact kv-events index.
-- `examples/values-pd-disaggregation.yaml` — the PD guide's **router only** (see note).
+- `examples/values-pd-disaggregation.yaml` — prefill/decode disaggregation (see the P/D section).
 
 ## Observability
 
@@ -105,6 +107,8 @@ The modelserver's native additive knobs (no need to restate `decode.spec`), unde
 | Env vars                    | `decode.extraEnv`                                                |
 | Extra volumes / mounts      | `decode.extraVolumes`, `decode.extraVolumeMounts`                |
 | Autoscaling (KEDA)          | `autoscaling.keda.enabled: true` **+ `eppServiceName: <release>-epp`** |
+| P/D prefill role            | `prefill.enabled: true` + `prefill.*` (mirrors every `decode.*` knob) — see the P/D section |
+| Image tag (all vLLM images) | `identity.vllmVersion` (shared tag; `decode.image`/`prefill.image` override repo+tag per role) |
 
 To **remove** a default arg (not just override it), edit `decode.spec.args` in
 `values.yaml` — that's the base, and the only place args live.
@@ -113,7 +117,7 @@ To **remove** a default arg (not just override it), edit `decode.spec.args` in
 
 - `examples/values-optimized-baseline.yaml` — prefix-cache-affinity routing.
 - `examples/values-precise-prefix-cache-routing.yaml` — precise (kv-events) routing.
-- `examples/values-pd-disaggregation.yaml` — PD guide, **router only** (see note).
+- `examples/values-pd-disaggregation.yaml` — full prefill/decode disaggregation (see the P/D section).
 - `examples/values-existing-pvc.yaml` — load weights from an existing PVC, offline.
 - `examples/values-bring-your-own.yaml` — existing SA + hardened pod.
 - `examples/values-observability.yaml` — add distributed tracing.
