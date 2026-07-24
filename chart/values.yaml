@@ -9,14 +9,14 @@
 #
 #   helm install my-llm-d . -n <namespace> -f my-values.yaml
 #
-# The two subcharts (charts/llm-d-router, charts/llm-d-modelserver) are NEVER
-# modified — this file feeds them through their normal values. The model name is
-# single-sourced into the vLLM args WITHOUT touching the chart by:
-#   • the serve positional arg  ->  *model  (a YAML alias)
-#   • the kv-events topic        ->  $(MODEL_NAME), a container env whose value is
-#     also *model, expanded by Kubernetes at runtime (same trick the stock spec
-#     already uses for $(POD_IP)/$(POD_PORT)).
-# So the literal model string is written exactly once, at &model.
+# This file feeds the two subcharts through their normal values: anything under
+#   llm-d-router:      -> charts/llm-d-router/values.yaml  (passthrough to the OCI chart)
+#   llm-d-modelserver: -> charts/llm-d-modelserver/values.yaml
+# is overridable here. This file surfaces the COMMONLY-tuned knobs; the two
+# subchart values.yaml files are the COMPLETE reference for every key.
+#
+# The model name is single-sourced into the vLLM args via the *model YAML alias
+# (serve arg + --served-model-name); it is written exactly once, at &model.
 #
 # The GATEWAY is not managed here — deploy it separately (e.g. the standalone
 # llm-d-gateway chart) and put its name in identity.gateway so the router's
@@ -303,11 +303,53 @@ llm-d-modelserver:
   monitoring:
     podMonitor:
       enabled: true
+      interval: 30s
+      path: /metrics
 
-  # KEDA autoscaling. The pristine chart REQUIRES eppServiceName (it cannot infer
-  # the router release). In this umbrella the EPP Service is <release>-epp, so set
-  # eppServiceName to "<your-release>-epp" when enabling autoscaling.
+  # KEDA autoscaling — the FULL surface (all of it overridable here). OFF by
+  # default. In this umbrella the EPP Service is <release>-epp, so set
+  # eppServiceName to "<your-release>-epp" when you enable it.
   autoscaling:
     keda:
       enabled: false
-      eppServiceName: ""
+      eppServiceName: ""            # REQUIRED when enabled: "<release>-epp"
+      minReplicas: 1
+      maxReplicas: 8
+      pollingInterval: 15           # seconds between metric polls
+      cooldownPeriod: 300           # seconds before scaling to 0
+      # HPA scale up/down behavior (fed to the generated HPA).
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - { type: Percent, value: 100, periodSeconds: 15 }
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - { type: Percent, value: 100, periodSeconds: 15 }
+      prometheus:
+        serverAddress: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+        auth:
+          enabled: false
+          name: keda-prometheus-auth
+          create: true
+          secretTargetRef:
+            - { parameter: ca, name: keda-prometheus-auth, key: ca.crt }
+      # Triggers (each with its own THRESHOLD). {{ }} is templated by the chart:
+      # .eppService -> <release>-epp, .Values.model.name -> the served model.
+      triggers:
+        # Active running requests per replica — the load-based signal.
+        - name: epp-running-requests
+          enabled: true
+          metricType: AverageValue
+          query: >-
+            sum(llm_d_epp_request_running{namespace="{{ .Release.Namespace }}",service="{{ .eppService }}",model_name="{{ .Values.model.name }}"})
+          threshold: "16"          # target running requests per replica — TUNE ME
+        # Flow-control queue depth — only emitted when the router flowControl gate
+        # is on. Off by default (stays 0 on small clusters).
+        - name: epp-queue-size
+          enabled: false
+          metricType: AverageValue
+          query: >-
+            sum(llm_d_epp_flow_control_queue_size{namespace="{{ .Release.Namespace }}",service="{{ .eppService }}",model_name="{{ .Values.model.name }}"})
+          threshold: "1"
