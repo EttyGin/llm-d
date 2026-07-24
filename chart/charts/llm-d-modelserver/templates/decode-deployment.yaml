@@ -69,6 +69,7 @@ spec:
           {{- with $d.extraEnv }}{{- $_ := set $c "env" (concat ($c.env | default list) .) }}{{- end }}
           {{- with $d.extraVolumeMounts }}{{- $_ := set $c "volumeMounts" (concat ($c.volumeMounts | default list) .) }}{{- end }}
           {{- with $d.containerSecurityContext }}{{- $_ := set $c "securityContext" . }}{{- end }}
+          {{- if and $d.image $d.image.repository }}{{- $_ := set $c "image" (printf "%s:%s" $d.image.repository ($d.image.tag | default "latest")) }}{{- end }}
         {{- end }}
         {{- $containers = append $containers $c }}
       {{- end }}

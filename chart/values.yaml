@@ -39,6 +39,10 @@ identity:
   gateway: &gwName llm-d-inference-gateway
   # Secret holding HF_TOKEN — how the model is pulled from HuggingFace.
   hfTokenSecretName: &hfSecret llm-d-hf-token
+  # vLLM release. Shared by ALL three images (decode / tokenizer / render) — only
+  # the TAG is shared; the repositories stay different (decode=GPU vllm-openai,
+  # tokenizer+render=CPU vllm-openai-cpu).
+  vllmVersion: &vllmVersion v0.23.0
 
 # Observability (tracing + Prometheus) is OFF by default. Turn the WHOLE thing on
 # with one flag:  -f examples/values-observability.yaml   (omit it = off).
@@ -125,6 +129,10 @@ llm-d-router:
       tokenizer:
         enabled: false
         modelName: *model
+        # GPU-less CPU image; only the tag follows the shared vLLM version.
+        image:
+          repository: vllm/vllm-openai-cpu
+          tag: *vllmVersion
 
       # Gateway mode: the (external) Gateway's own proxy handles the data plane.
       proxy:
@@ -195,6 +203,15 @@ llm-d-modelserver:
     podSecurityContext: {}
     imagePullSecrets: []
 
+    # Decode image, split into repository + tag so the TAG follows the shared
+    # vLLM version. GPU image (NVIDIA + vLLM); for other targets switch the
+    # repository (AMD -> ghcr.io/llm-d/llm-d-rocm, Intel -> .../llm-d-xpu,
+    # CPU -> .../llm-d-cpu). The chart builds "<repository>:<tag>" and overrides
+    # the container image in decode.spec below.
+    image:
+      repository: vllm/vllm-openai
+      tag: *vllmVersion
+
     # ── decode.spec == the kustomize patch `spec:`, rendered VERBATIM ─────────
     # GENERIC optimized-baseline model server (matches guides/optimized-baseline
     # patch-vllm.yaml exactly): plain `vllm serve`, no kv-events. The llm-d-
@@ -208,12 +225,7 @@ llm-d-modelserver:
         spec:
           containers:
             - name: modelserver
-              # NVIDIA GPU + vLLM uses vanilla vllm/vllm-openai (matches the
-              # optimized-baseline guide — there is NO llm-d-cuda image). For
-              # other targets switch to the llm-d image:
-              #   AMD  -> ghcr.io/llm-d/llm-d-rocm   Intel -> ghcr.io/llm-d/llm-d-xpu
-              #   CPU  -> ghcr.io/llm-d/llm-d-cpu
-              image: vllm/vllm-openai:v0.23.0
+              # image is set from decode.image above (repository + shared tag).
               imagePullPolicy: IfNotPresent
               command: ["vllm", "serve"]
               args:
@@ -278,6 +290,13 @@ llm-d-modelserver:
               emptyDir: {}
             - name: vllm-config
               emptyDir: {}
+
+  # Standalone render (tokenizer) Service — OFF by default. If you enable it
+  # (render.enabled), its CPU image tag follows the shared vLLM version.
+  render:
+    image:
+      repository: vllm/vllm-openai-cpu
+      tag: *vllmVersion
 
   # Prometheus PodMonitor for decode — ON by default (matches the EPP
   # ServiceMonitor). REQUIRES the Prometheus Operator (PodMonitor CRD).

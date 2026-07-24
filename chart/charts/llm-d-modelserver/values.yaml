@@ -70,6 +70,11 @@ decode:
   podSecurityContext: {}       # sets pod-level securityContext
   imagePullSecrets: []         # sets pod imagePullSecrets
 
+  # Optional image override for the target container. When repository is set the
+  # chart builds "<repository>:<tag>" and overrides the image in decode.spec —
+  # lets a parent chart single-source the tag while keeping decode.spec verbatim.
+  image: {}                    # e.g. { repository: vllm/vllm-openai, tag: v0.23.0 }
+
   # ---- The verbatim patch (== patch-vllm.yaml `spec:`) ----
   spec:
     replicas: 1
