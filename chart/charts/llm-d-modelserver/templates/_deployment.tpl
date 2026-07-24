@@ -15,11 +15,12 @@ podAnnotations/deploymentAnnotations) merge onto it identically for both roles.
 {{- define "llm-d-modelserver.serverDeployment" -}}
 {{- $ := .root -}}
 {{- $role := .role -}}
+{{- $suffix := .nameSuffix | default .role -}}
 {{- $d := .cfg -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "llm-d-modelserver.name" $ }}-{{ $role }}
+  name: {{ include "llm-d-modelserver.name" $ }}-{{ $suffix }}
   namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "llm-d-modelserver.labels" $ | nindent 4 }}

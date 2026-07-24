@@ -1,3 +1,7 @@
 {{- if .Values.decode.enabled }}
-{{- include "llm-d-modelserver.serverDeployment" (dict "root" $ "role" "decode" "cfg" .Values.decode) }}
+{{- /*
+  Primary model server. Aggregated (prefill OFF): role=prefill-decode, named
+  <release>-modelserver. Disaggregated (prefill ON): role=decode, <release>-decode.
+*/ -}}
+{{- include "llm-d-modelserver.serverDeployment" (dict "root" $ "role" (include "llm-d-modelserver.decodeRole" .) "nameSuffix" (include "llm-d-modelserver.decodeSuffix" .) "cfg" .Values.decode) }}
 {{- end }}

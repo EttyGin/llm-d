@@ -132,11 +132,18 @@ are edited there in place, not layered.
 ## P/D disaggregation
 
 Full prefill/decode disaggregation is supported. `prefill.enabled: false` by
-default (renders nothing; decode is byte-identical when off). Prefill is the
-**same Deployment shape** as decode — same knobs (`spec`, `image`, `extraArgs`,
-`extraEnv`, volumes, securityContext, annotations, …), rendered by one shared
-template partial with the `llm-d.ai/role` label as the only parameter (kept
-consistent across selector + pod labels).
+default (no prefill Deployment). Prefill is the **same Deployment shape** as the
+decode server — same knobs (`spec`, `image`, `extraArgs`, `extraEnv`, volumes,
+securityContext, annotations, …), rendered by one shared template partial with
+the `llm-d.ai/role` label as the only parameter (kept consistent across selector
++ pod labels).
+
+**Naming follows the topology.** With prefill **off** (aggregated — one server
+does both phases) the model server is named `<release>-modelserver` with role
+`llm-d.ai/role: prefill-decode` — *not* "decode", which only means something under
+disaggregation. With prefill **on** it splits into `<release>-decode` (role
+`decode`) + `<release>-prefill` (role `prefill`). The PodMonitor and KEDA
+ScaledObject follow the same name automatically.
 
 Enabling prefill is **P/D mode and it mutates the decode pod** — decode gains the
 routing-proxy sidecar, a vLLM port shift to `8200`, the `nixl` port, and NIXL

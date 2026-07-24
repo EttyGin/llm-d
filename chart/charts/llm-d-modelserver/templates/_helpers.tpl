@@ -33,6 +33,23 @@ llm-d.ai/accelerator-vendor: {{ .root.Values.accelerator.vendor | quote }}
 {{- include "llm-d-modelserver.roleSelectorLabels" (dict "root" . "role" "decode") -}}
 {{- end -}}
 
+{{/*
+Naming/role for the primary model server. When prefill is OFF the single server
+handles BOTH phases, so it is role=prefill-decode (the llm-d "both-capable"
+value) and named "<release>-modelserver" — NOT "decode", which only makes sense
+under disaggregation. When prefill is ON (P/D) it is the decode role, named
+"<release>-decode".
+*/}}
+{{- define "llm-d-modelserver.decodeRole" -}}
+{{- if .Values.prefill.enabled -}}decode{{- else -}}prefill-decode{{- end -}}
+{{- end -}}
+{{- define "llm-d-modelserver.decodeSuffix" -}}
+{{- if .Values.prefill.enabled -}}decode{{- else -}}modelserver{{- end -}}
+{{- end -}}
+{{- define "llm-d-modelserver.decodeName" -}}
+{{- printf "%s-%s" (include "llm-d-modelserver.name" .) (include "llm-d-modelserver.decodeSuffix" .) -}}
+{{- end -}}
+
 {{/* Common metadata labels. */}}
 {{- define "llm-d-modelserver.labels" -}}
 app.kubernetes.io/name: {{ include "llm-d-modelserver.name" . }}

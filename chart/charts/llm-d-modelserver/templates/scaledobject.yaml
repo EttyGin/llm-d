@@ -27,7 +27,7 @@ spec:
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: {{ include "llm-d-modelserver.name" . }}-decode
+  name: {{ include "llm-d-modelserver.decodeName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "llm-d-modelserver.labels" . | nindent 4 }}
@@ -35,7 +35,7 @@ spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "llm-d-modelserver.name" . }}-decode
+    name: {{ include "llm-d-modelserver.decodeName" . }}
   pollingInterval: {{ $k.pollingInterval }}
   # Applies to scale-to-zero. The generated HPA behavior below controls
   # ordinary scale-down while minReplicaCount is 1 or greater.
