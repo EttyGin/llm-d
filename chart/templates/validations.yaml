@@ -41,3 +41,37 @@ runtime. Keep this file free of any real Kubernetes output.
 {{- fail "llm-d-modelserver.prefill.enabled is true (P/D mode) but decode's vLLM has no port shift. The decode engine must move to --port=8200 (the sidecar listens on 8000). Add it to decode.spec args or decode.extraArgs — see examples/values-pd-disaggregation.yaml." }}
 {{- end }}
 {{- end }}
+{{- /*
+  block-size consistency: precise-prefix-cache routing indexes KV blocks, so the
+  EPP plugin's tokenProcessorConfig.blockSize MUST equal the model server's vLLM
+  --block-size. They live in two unrelated spots (a plugin config string and the
+  decode args) and can't be single-sourced (the plugin config is an opaque YAML
+  string), so verify them here and fail fast on a missing/mismatched pair.
+*/ -}}
+{{- $router := index .Values "llm-d-router" | default dict -}}
+{{- $pcc := dig "llmd" "router" "epp" "pluginsCustomConfig" dict $router -}}
+{{- $pluginBS := "" -}}
+{{- range $file, $content := $pcc }}
+  {{- range $m := regexFindAll "blockSize:[ ]*[0-9]+" (toString $content) -1 }}
+    {{- $pluginBS = regexFind "[0-9]+" $m -}}
+  {{- end }}
+{{- end }}
+{{- if $pluginBS }}
+{{- $bcname := dig "decode" "containerName" "modelserver" $ms -}}
+{{- $bspec := dig "decode" "spec" "template" "spec" dict $ms -}}
+{{- $bargs := list -}}
+{{- range $c := ($bspec.containers | default list) }}
+  {{- if eq ($c.name | default "") $bcname }}{{- $bargs = concat $bargs ($c.args | default list) }}{{- end }}
+{{- end }}
+{{- $bargs = concat $bargs (dig "decode" "extraArgs" list $ms) -}}
+{{- $argStr := "" -}}
+{{- range $a := $bargs }}{{- $argStr = printf "%s %s" $argStr (toString $a) -}}{{- end }}
+{{- $argBS := "" -}}
+{{- range $mm := regexFindAll "--block-size[= ][0-9]+" $argStr -1 }}{{- $argBS = regexFind "[0-9]+" $mm -}}{{- end }}
+{{- if not $argBS }}
+{{- fail (printf "block-size: pluginsCustomConfig sets blockSize=%s but the decode model server has NO --block-size arg. They must match for precise prefix-cache routing — add --block-size=%s to llm-d-modelserver.decode.spec args (or decode.extraArgs)." $pluginBS $pluginBS) }}
+{{- end }}
+{{- if ne $argBS $pluginBS }}
+{{- fail (printf "block-size MISMATCH: pluginsCustomConfig blockSize=%s but decode --block-size=%s. They MUST be equal for precise prefix-cache routing (the EPP KV-block index would misalign with vLLM's blocks)." $pluginBS $argBS) }}
+{{- end }}
+{{- end }}
