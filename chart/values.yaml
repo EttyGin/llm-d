@@ -133,6 +133,9 @@ llm-d-router:
         image:
           repository: vllm/vllm-openai-cpu
           tag: *vllmVersion
+        port: 8000
+        resources:            # shrink on small clusters (see the minikube values)
+          requests: { cpu: "4", memory: 8Gi }
 
       # Gateway mode: the (external) Gateway's own proxy handles the data plane.
       proxy:
@@ -148,9 +151,14 @@ llm-d-router:
           auth:
             enabled: false
 
-      # Tracing is opt-in (needs a collector) — enable via examples/values-observability.yaml.
+      # Tracing — OFF by default (needs a collector). Turn on here, or via
+      # examples/values-observability.yaml. Client-side: EPP emits to the endpoint.
       tracing:
         enabled: false
+        otelExporterEndpoint: "http://otel-collector:4317"
+        sampling:
+          sampler: "parentbased_traceidratio"
+          samplerArg: "0.1"   # 10% in production; "1.0" while validating
 
       latencyPredictor:
         enabled: false
@@ -291,12 +299,19 @@ llm-d-modelserver:
             - name: vllm-config
               emptyDir: {}
 
-  # Standalone render (tokenizer) Service — OFF by default. If you enable it
-  # (render.enabled), its CPU image tag follows the shared vLLM version.
+  # Standalone render (tokenizer) Service — OFF by default (tokenization runs as
+  # the EPP sidecar instead). Enable this to share ONE render Service across EPP
+  # replicas. Its CPU image tag follows the shared vLLM version.
   render:
+    enabled: false
+    replicas: 1
+    port: 8000
     image:
       repository: vllm/vllm-openai-cpu
       tag: *vllmVersion
+    resources:
+      requests: { cpu: "1", memory: 4Gi }
+      limits: { cpu: "4", memory: 12Gi }
 
   # Prometheus PodMonitor for decode — ON by default (matches the EPP
   # ServiceMonitor). REQUIRES the Prometheus Operator (PodMonitor CRD).
