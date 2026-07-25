@@ -1,22 +1,26 @@
 {{- define "llm-d-router.rbac" -}}
 {{- /*
-  VENDORED PATCH (llm-d umbrella): bring-your-own ClusterRole. See
-  charts/llm-d-router/PATCHES.md — re-apply on OCI version bumps.
-    router.rbac.clusterRole.create        (default true)  ONE switch: false = create
-        NEITHER the ClusterRole NOR the ClusterRoleBinding (all cluster-scoped
-        RBAC — needs cluster-admin). Pre-provision them yourself; the EPP SA + its
-        namespaced Roles are still created in-namespace, no admin needed.
-    router.rbac.clusterRole.existingName  (default "")     only used if the chart
-        creates the binding — the ClusterRole name it binds to.
-    router.rbac.clusterRoleBinding.create (default = clusterRole.create)  advanced
-        override: create the binding even when clusterRole.create is false.
+  VENDORED PATCH (llm-d umbrella): use an EXISTING EPP ClusterRole. See
+  charts/llm-d-router/PATCHES.md — rebuild on OCI version bumps.
+    router.rbac.clusterRole.create       (default true)  create the ClusterRole + binding
+    router.rbac.clusterRole.existingName  (default "")    with create:false, the chart binds
+        the EPP SA to THIS existing ClusterRole (does not create the ClusterRole).
+    router.rbac.clusterRoleBinding.create (advanced override)
 */ -}}
 {{- $rbac := .Values.router.rbac | default dict -}}
 {{- $crCfg := $rbac.clusterRole | default dict -}}
 {{- $crCreate := dig "create" true $crCfg -}}
 {{- $crName := $crCfg.existingName | default (include "llm-d-router.cluster-rbac-name" .) -}}
-{{- /* binding defaults to the ClusterRole toggle: clusterRole.create:false skips BOTH (no cluster-admin needed) */ -}}
+{{- /*
+  Binding logic:
+    create:true                       -> create ClusterRole + binding (default)
+    create:false + existingName:X     -> DON'T create the ClusterRole; DO create the
+                                         binding to X (use the existing ClusterRole)
+    create:false + no existingName     -> create NOTHING (you pre-provisioned both)
+  clusterRoleBinding.create explicitly overrides.
+*/ -}}
 {{- $crbCreate := $crCreate -}}
+{{- if and (not $crCreate) $crCfg.existingName }}{{- $crbCreate = true -}}{{- end -}}
 {{- with $rbac.clusterRoleBinding }}{{- if hasKey . "create" }}{{- $crbCreate = .create }}{{- end }}{{- end }}
 {{- if .Values.router.monitoring.prometheus.enabled }}
 {{- if $crCreate }}

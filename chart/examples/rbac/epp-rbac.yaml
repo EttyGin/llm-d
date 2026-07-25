@@ -1,20 +1,21 @@
 # =============================================================================
-# EPP cluster-scoped RBAC — pre-provision these yourself (needs cluster-admin),
-# then tell the chart NOT to create them with the single toggle:
-#
-#     llm-d-router.llmd.router.rbac.clusterRole.create: false
-#     (see examples/values-byo-clusterrole.yaml)
-#
-# Only these two objects are affected by that toggle — the EPP ServiceAccount and
-# its namespaced Roles/RoleBindings are still created by the chart as usual.
+# The EPP ClusterRole to PRE-PROVISION (needs cluster-admin), then point the
+# chart at it with:  examples/values-byo-clusterrole.yaml  (create:false +
+# existingName). The chart creates the ClusterRoleBinding to it — you only need
+# this ClusterRole; you do NOT pre-create the binding.
 #
 # Rendered with placeholders `release` / `namespace` — replace with your Helm
-# release name and target namespace, e.g.:
+# release name and namespace, e.g.:
 #     sed 's/\brelease\b/ppc/g; s/\bnamespace\b/llm-d/g' epp-rbac.yaml | kubectl apply -f -
 #
-# NOTE: the chart only creates these when monitoring.prometheus.enabled=true, and
-# they are only *used* when the EPP metrics auth is on. With auth off (default)
-# you can skip them entirely with no functional change.
+# The name here (`<release>-<namespace>-epp`) is just the chart's default — you
+# may name your ClusterRole anything and put that in existingName. This
+# ClusterRole is only *used* when EPP metrics auth is on; with auth off (default)
+# the EPP runs fine without it.
+#
+# (Fully pre-provisioned instead? Create this ClusterRole AND a ClusterRoleBinding
+#  binding the `<release>-epp` ServiceAccount to it, then set create:false with
+#  existingName EMPTY so the chart makes nothing cluster-scoped.)
 # =============================================================================
 # Source: llm-d/charts/llm-d-router/charts/llmd/templates/rbac.yaml
 kind: ClusterRole
@@ -41,17 +42,3 @@ rules:
       - "/metrics"
     verbs:
       - get
----
-# Source: llm-d/charts/llm-d-router/charts/llmd/templates/rbac.yaml
-kind: ClusterRoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
-metadata:
-  name: "release-namespace-epp"
-subjects:
-  - kind: ServiceAccount
-    name: release-epp
-    namespace: namespace
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: "release-namespace-epp"
