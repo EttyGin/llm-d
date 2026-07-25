@@ -17,9 +17,9 @@ opt-out. The patch adds knobs (surfaced as `llm-d-router.llmd.router.rbac.*`):
 
 | value | default | effect |
 |-------|---------|--------|
-| `router.rbac.clusterRole.create`        | `true` | create the ClusterRole |
-| `router.rbac.clusterRole.existingName`  | `""`   | bind to this EXISTING ClusterRole instead of creating one |
-| `router.rbac.clusterRoleBinding.create` | `true` | create the binding (EPP SA → ClusterRole) |
+| `router.rbac.clusterRole.create`        | `true` | **ONE switch.** `false` = create NEITHER the ClusterRole NOR the ClusterRoleBinding (all cluster-scoped RBAC — needs admin). Pre-provision yourself. |
+| `router.rbac.clusterRole.existingName`  | `""`   | only used if the chart creates the binding — the ClusterRole name it binds to |
+| `router.rbac.clusterRoleBinding.create` | `= clusterRole.create` | advanced override: create the binding even when `clusterRole.create` is false (needs bind permission) |
 
 Everything else (namespaced Role/RoleBinding, EPP SA) is unchanged. Default
 render is byte-identical to upstream.

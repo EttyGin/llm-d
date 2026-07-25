@@ -151,18 +151,23 @@ llm-d-router:
           auth:
             enabled: false
 
-      # EPP cluster-scoped RBAC (the /metrics-auth ClusterRole, created only when
-      # monitoring.prometheus.enabled=true). VENDORED-PATCH knob — bring your own:
-      #   clusterRole.create:false + clusterRole.existingName:<name>  → don't create
-      #     the ClusterRole; bind the EPP SA to your existing one instead.
-      #   clusterRoleBinding.create:false → don't create the binding either (fully BYO).
+      # EPP cluster-scoped RBAC (the /metrics-auth ClusterRole + its binding,
+      # created only when monitoring.prometheus.enabled=true). VENDORED-PATCH.
+      #   clusterRole.create: false   ← ONE SWITCH. Creates NEITHER the ClusterRole
+      #     NOR the ClusterRoleBinding (both need cluster-admin). Pre-provision them
+      #     yourself (examples/rbac/epp-rbac.yaml); the EPP SA + namespaced Roles
+      #     are still created in-namespace, no admin needed. With auth off (default)
+      #     nothing else changes — the ClusterRole is only used for metrics-auth.
       # (See charts/llm-d-router/PATCHES.md — re-apply on OCI version bumps.)
       rbac:
         clusterRole:
           create: true
-          existingName: ""
-        clusterRoleBinding:
-          create: true
+          existingName: ""      # only used if the chart creates the binding
+        # clusterRoleBinding.create defaults to clusterRole.create. Set it true
+        # explicitly only for the advanced case: create:false but you DO have
+        # permission to bind the EPP SA to an existing ClusterRole.
+        # clusterRoleBinding:
+        #   create: true
 
       # Tracing — OFF by default (needs a collector). Turn on here, or via
       # examples/values-observability.yaml. Client-side: EPP emits to the endpoint.

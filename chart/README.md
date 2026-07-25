@@ -162,15 +162,20 @@ see the note in `values.yaml`). Production needs an RDMA (IB/RoCE) interconnect.
 - **EPP RBAC**: the upstream OCI `llm-d-router-gateway` chart creates the EPP
   ServiceAccount + namespaced Role/RoleBinding (always) and a `/metrics`-auth
   **ClusterRole** (when `...monitoring.prometheus.enabled=true`, i.e. by default).
-  The namespaced Role/SA are not swappable. The **ClusterRole is** — via a small
-  vendored patch (`charts/llm-d-router/PATCHES.md`):
-  `llm-d-router.llmd.router.rbac.clusterRole.create: false` +
-  `...clusterRole.existingName: <name>` binds the EPP SA to an existing
-  ClusterRole instead of creating one (`...clusterRoleBinding.create: false` skips
-  the binding too). Cost: the router is no longer a pristine passthrough — re-run
+  The namespaced Role/SA are created in-namespace (no admin needed) and are not
+  swappable. The **cluster-scoped** objects are — via a small vendored patch
+  (`charts/llm-d-router/PATCHES.md`). **One switch** for admin-less installs:
+
+  ```yaml
+  llm-d-router: { llmd: { router: { rbac: { clusterRole: { create: false } } } } }
+  ```
+
+  `clusterRole.create: false` creates **neither** the ClusterRole **nor** its
+  ClusterRoleBinding (both need cluster-admin) — pre-provision them yourself from
+  `examples/rbac/epp-rbac.yaml`. With `auth` off (default) nothing else changes,
+  since that ClusterRole is only used for metrics-auth. Cost: the router is no
+  longer a pristine passthrough — re-run
   `charts/llm-d-router/patches/apply-patches.sh` after any OCI version bump.
-  `examples/rbac/epp-rbac.yaml` has the exact RBAC objects (placeholders
-  `release`/`namespace`) to pre-apply and then reference via `existingName`.
 
 ## Fail-fast validations
 
