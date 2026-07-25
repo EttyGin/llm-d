@@ -159,11 +159,16 @@ see the note in `values.yaml`). Production needs an RDMA (IB/RoCE) interconnect.
 
 - **KEDA `eppServiceName`** is required when autoscaling is on — the modelserver
   chart can't infer the router release, so set it to `<release>-epp`.
-- **EPP RBAC**: the router is a pure passthrough over the upstream OCI
-  `llm-d-router-gateway` chart, which **always creates** the EPP ServiceAccount +
-  namespaced Role/RoleBinding (and a ClusterRole when
-  `...monitoring.prometheus.enabled=true`, i.e. by default now). Bring-your-own
-  EPP Role is not supported. BYO is available for the **modelserver** SA.
+- **EPP RBAC**: the upstream OCI `llm-d-router-gateway` chart creates the EPP
+  ServiceAccount + namespaced Role/RoleBinding (always) and a `/metrics`-auth
+  **ClusterRole** (when `...monitoring.prometheus.enabled=true`, i.e. by default).
+  The namespaced Role/SA are not swappable. The **ClusterRole is** — via a small
+  vendored patch (`charts/llm-d-router/PATCHES.md`):
+  `llm-d-router.llmd.router.rbac.clusterRole.create: false` +
+  `...clusterRole.existingName: <name>` binds the EPP SA to an existing
+  ClusterRole instead of creating one (`...clusterRoleBinding.create: false` skips
+  the binding too). Cost: the router is no longer a pristine passthrough — re-run
+  `charts/llm-d-router/patches/apply-patches.sh` after any OCI version bump.
 
 ## Fail-fast validations
 
