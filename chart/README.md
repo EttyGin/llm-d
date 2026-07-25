@@ -122,6 +122,8 @@ To **remove** a default arg (not just override it), edit `decode.spec.args` in
 - `examples/values-bring-your-own.yaml` — existing SA + hardened pod.
 - `examples/values-observability.yaml` — add distributed tracing.
 - `examples/values-autoscaling.yaml` — enable KEDA.
+- `examples/values-byo-clusterrole.yaml` — admin-less install: don't create the EPP
+  ClusterRole/Binding (pre-provision from `examples/rbac/epp-rbac.yaml`).
 
 **Changing the model / hardware** is not a tiny overlay: the base lives in
 `values.yaml`, so copy it, edit the `identity:` anchors (model propagates

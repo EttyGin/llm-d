@@ -1,0 +1,18 @@
+# Bring your own EPP ClusterRole (admin-less install).
+#
+#   1. Pre-provision the cluster-scoped RBAC (as an admin):
+#        sed 's/\brelease\b/<release>/g; s/\bnamespace\b/<ns>/g' \
+#          examples/rbac/epp-rbac.yaml | kubectl apply -f -
+#   2. Install with this overlay so the chart creates NEITHER the ClusterRole
+#      nor the ClusterRoleBinding (both need cluster-admin):
+#        helm install <release> . -n <ns> -f examples/values-byo-clusterrole.yaml
+#
+# The EPP ServiceAccount + its namespaced Roles/RoleBindings are still created by
+# the chart in-namespace — no admin needed.
+
+llm-d-router:
+  llmd:
+    router:
+      rbac:
+        clusterRole:
+          create: false
