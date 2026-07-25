@@ -1,0 +1,133 @@
+# =============================================================================
+# EPP RBAC — the exact objects the router (llm-d-router-gateway) creates, so you
+# can PRE-PROVISION them yourself and tell the chart not to create them.
+#
+# Rendered with placeholders `release` / `namespace` — replace with your Helm
+# release name and target namespace before applying, e.g.:
+#     sed 's/\brelease\b/ppc/g; s/\bnamespace\b/llm-d/g' epp-rbac.yaml | kubectl apply -f -
+#
+# ── CLUSTER-SCOPED (needs cluster-admin) — ClusterRole + ClusterRoleBinding
+#    named `<release>-<namespace>-epp`. Created only when
+#    monitoring.prometheus.enabled=true. To use your pre-applied ones, set:
+#        llm-d-router.llmd.router.rbac.clusterRole.create: false
+#        llm-d-router.llmd.router.rbac.clusterRole.existingName: <release>-<namespace>-epp
+#        llm-d-router.llmd.router.rbac.clusterRoleBinding.create: false   # if you applied the binding too
+#
+# ── NAMESPACED — the ServiceAccount + Roles/RoleBindings (`<release>-epp*`).
+#    The chart ALWAYS creates these in its own namespace (no skip knob today).
+#    Shown here for audit / if you want them pre-created; if you apply them AND
+#    let the chart create them, Helm will conflict on ownership.
+# =============================================================================
+# Source: llm-d/charts/llm-d-router/charts/llmd/templates/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: release-epp
+  namespace: namespace
+  labels:
+    app.kubernetes.io/name: release-epp
+    app.kubernetes.io/version: "v0.9.0"
+---
+# Source: llm-d/charts/llm-d-router/charts/llmd/templates/rbac.yaml
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: "release-namespace-epp"
+  labels:
+    app.kubernetes.io/name: release-epp
+    app.kubernetes.io/version: "v0.9.0"
+rules:
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+  - nonResourceURLs:
+      - "/metrics"
+    verbs:
+      - get
+---
+# Source: llm-d/charts/llm-d-router/charts/llmd/templates/rbac.yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: "release-namespace-epp"
+subjects:
+  - kind: ServiceAccount
+    name: release-epp
+    namespace: namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: "release-namespace-epp"
+---
+# Source: llm-d/charts/llm-d-router/charts/llmd/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: release-epp-non-sa
+  namespace: namespace
+  labels:
+    app.kubernetes.io/name: release-epp
+    app.kubernetes.io/version: "v0.9.0"
+rules:
+  - apiGroups: ["inference.networking.x-k8s.io"]
+    resources: ["inferenceobjectives", "inferencemodelrewrites"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["llm-d.ai"]
+    resources: ["inferenceobjectives", "inferencemodelrewrites"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["inference.networking.k8s.io"]
+    resources: ["inferencepools"]
+    verbs: ["get", "watch", "list"]
+---
+# Source: llm-d/charts/llm-d-router/charts/llmd/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: release-epp-sa
+  namespace: namespace
+  labels:
+    app.kubernetes.io/name: release-epp
+    app.kubernetes.io/version: "v0.9.0"
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "watch", "list"]
+---
+# Source: llm-d/charts/llm-d-router/charts/llmd/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: release-epp-non-sa
+  namespace: namespace
+subjects:
+  - kind: ServiceAccount
+    name: release-epp
+    namespace: namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: release-epp-non-sa
+---
+# Source: llm-d/charts/llm-d-router/charts/llmd/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: release-epp-sa
+  namespace: namespace
+subjects:
+  - kind: ServiceAccount
+    name: release-epp
+    namespace: namespace
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: release-epp-sa

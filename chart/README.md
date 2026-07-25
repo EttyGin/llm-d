@@ -169,6 +169,8 @@ see the note in `values.yaml`). Production needs an RDMA (IB/RoCE) interconnect.
   ClusterRole instead of creating one (`...clusterRoleBinding.create: false` skips
   the binding too). Cost: the router is no longer a pristine passthrough — re-run
   `charts/llm-d-router/patches/apply-patches.sh` after any OCI version bump.
+  `examples/rbac/epp-rbac.yaml` has the exact RBAC objects (placeholders
+  `release`/`namespace`) to pre-apply and then reference via `existingName`.
 
 ## Fail-fast validations
 
