@@ -165,6 +165,20 @@ see the note in `values.yaml`). Production needs an RDMA (IB/RoCE) interconnect.
   `...monitoring.prometheus.enabled=true`, i.e. by default now). Bring-your-own
   EPP Role is not supported. BYO is available for the **modelserver** SA.
 
+## Fail-fast validations
+
+`templates/validations.yaml` catches config mistakes at render/install time (not
+at runtime):
+
+- `identity.model` and `identity.gateway` are required.
+- **KEDA**: `eppServiceName` is required when autoscaling is enabled.
+- **P/D**: with `prefill.enabled: true`, `decode.spec` must carry the routing-proxy
+  sidecar **and** the `--port` shift, or install fails.
+- **Precise routing**: if any `pluginsCustomConfig` sets `blockSize`, the decode
+  `--block-size` must match it; if it sets `modelName`, it must equal
+  `model.name`. (These two can't be single-sourced — they live inside the opaque
+  plugin config string — so they're verified instead.)
+
 ## Verify a render
 
 ```bash
