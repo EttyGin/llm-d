@@ -1,25 +1,48 @@
 # =============================================================================
-# guides/wide-ep-lws — WITHOUT LeaderWorkerSet (single-node wide expert
-# parallelism). DeepSeek-R1, P/D, all DP ranks on ONE multi-GPU node → each role
-# is a plain Deployment. No LWS controller needed.
+# Wide expert parallelism WITHOUT LeaderWorkerSet — single-node (all DP ranks on
+# ONE multi-GPU node), so each role is a plain Deployment. No LWS controller.
 #
 #   helm install wide-ep . -n <ns> -f examples/values-wide-ep.yaml
 #
-# Difference from values-wide-ep-lws.yaml: workload stays `deployment` (default),
-# so no leader/worker split — all DP is local (--data-parallel-size-local ==
-# --data-parallel-size), no LWS_* env. Fits when all experts fit on one node.
+# NOTE: guides/wide-ep-lws itself is LWS-only (it spans nodes). This is the
+# DERIVED single-node variant — it drops the multi-node DP-supervisor wiring
+# (no LWS_LEADER_ADDRESS / --data-parallel-address / start-rank; NOT Ray either)
+# and runs all DP ranks locally: --data-parallel-size == --data-parallel-size-local.
+# Fits when the whole model + all experts fit on one node.
+#
+# Difference from values-wide-ep-lws.yaml: workload stays `deployment` (default).
 # =============================================================================
 _widx:
   model:      &model      deepseek-ai/DeepSeek-R1-0528
   modelLabel: &modelLabel DeepSeek-R1-0528
   sidecar:    &sidecar    ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.9.0
+  # Single-node launch — all DP local, no leader address, no Ray.
+  script: &script |-
+    find /dev/shm -type f -delete
+    exec vllm serve deepseek-ai/DeepSeek-R1-0528 \
+      --port 8200 \
+      --disable-access-log-for-endpoints=/health,/metrics \
+      --enable-expert-parallel \
+      --tensor-parallel-size $TP_SIZE \
+      --max-num-batched-tokens ${MAX_TOKENS} --max-num-seqs ${MAX_TOKENS} \
+      --data-parallel-size $DP_SIZE_LOCAL \
+      --data-parallel-size-local $DP_SIZE_LOCAL \
+      --kv_transfer_config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}' \
+      --all2all-backend deepep_low_latency --moe-backend deep_gemm
+
+_env: &wideEpEnv
+  - { name: TP_SIZE, value: "1" }
+  - { name: DP_SIZE_LOCAL, value: "8" }
+  - { name: MAX_TOKENS, value: "8192" }
+  - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: llm-d-hf-token, key: HF_TOKEN } } }
+  - { name: VLLM_NIXL_SIDE_CHANNEL_HOST, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+  # + NVSHMEM_*, NCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME, VLLM_USE_DEEP_GEMM, …
 
 llm-d-modelserver:
   model: { name: *model, label: *modelLabel }
   guideLabel: wide-ep-lws
   accelerator: { variant: gpu, vendor: nvidia }
 
-  # ---- Decode: single-node Deployment, DP local ----
   decode:
     enabled: true
     workload: deployment            # ← the only structural difference vs -lws
@@ -46,29 +69,19 @@ llm-d-modelserver:
           containers:
             - name: vllm
               command: ["/bin/bash", "-c"]
-              args:
-                - |-
-                  exec vllm serve deepseek-ai/DeepSeek-R1-0528 \
-                    --port 8200 --enable-expert-parallel \
-                    --data-parallel-size $DP_SIZE_LOCAL \
-                    --data-parallel-size-local $DP_SIZE_LOCAL \
-                    --kv_transfer_config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-              env:
-                - { name: DP_SIZE_LOCAL, value: "8" }
-                - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: llm-d-hf-token, key: HF_TOKEN } } }
-                - { name: VLLM_NIXL_SIDE_CHANNEL_HOST, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+              args: [*script]
+              env: *wideEpEnv
               ports:
                 - { name: vllm, containerPort: 8200, protocol: TCP }
                 - { name: nixl, containerPort: 5600, protocol: TCP }
               resources:
-                limits: { nvidia.com/gpu: "8" }
+                limits: { nvidia.com/gpu: "8", memory: 512Gi, ephemeral-storage: 1Ti }
               volumeMounts:
                 - { name: shm, mountPath: /dev/shm }
           volumes:
             - name: shm
               emptyDir: { medium: Memory, sizeLimit: 40Gi }
 
-  # ---- Prefill: single-node Deployment ----
   prefill:
     enabled: true
     workload: deployment
@@ -81,29 +94,19 @@ llm-d-modelserver:
           containers:
             - name: vllm
               command: ["/bin/bash", "-c"]
-              args:
-                - |-
-                  exec vllm serve deepseek-ai/DeepSeek-R1-0528 \
-                    --port 8200 --enable-expert-parallel \
-                    --data-parallel-size $DP_SIZE_LOCAL \
-                    --data-parallel-size-local $DP_SIZE_LOCAL \
-                    --kv_transfer_config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-              env:
-                - { name: DP_SIZE_LOCAL, value: "8" }
-                - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: llm-d-hf-token, key: HF_TOKEN } } }
-                - { name: VLLM_NIXL_SIDE_CHANNEL_HOST, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+              args: [*script]
+              env: *wideEpEnv
               ports:
                 - { name: vllm, containerPort: 8200, protocol: TCP }
                 - { name: nixl, containerPort: 5600, protocol: TCP }
               resources:
-                limits: { nvidia.com/gpu: "8" }
+                limits: { nvidia.com/gpu: "8", memory: 512Gi, ephemeral-storage: 1Ti }
               volumeMounts:
                 - { name: shm, mountPath: /dev/shm }
           volumes:
             - name: shm
               emptyDir: { medium: Memory, sizeLimit: 40Gi }
 
-# ---- Router: identical wide-EP EPP (P/D plugins) ----
 llm-d-router:
   llmd:
     router:
