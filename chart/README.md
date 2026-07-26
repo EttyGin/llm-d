@@ -123,7 +123,8 @@ To **remove** a default arg (not just override it), edit `decode.spec.args` in
 - `examples/values-wide-ep-lws.yaml` — wide expert parallelism as `LeaderWorkerSet` (multi-node DP).
 - `examples/values-wide-ep.yaml` — the same wide-EP as a single-node `Deployment` (no LWS).
 - `examples/values-lws-minikube.yaml` — a size=1 `LeaderWorkerSet` that actually runs on a CPU minikube (LWS smoke test).
-- `examples/values-wide-ep-glm.yaml` — single-node wide-EP (no LWS) for `zai-org/GLM-5.2-FP8` (manual `pip install modelexpress` in the launch script).
+- `examples/values-wide-ep-glm.yaml` — single-node wide-EP (no LWS) for `zai-org/GLM-5.2-FP8`, P/D disaggregated (manual `pip install modelexpress` in the launch script).
+- `examples/values-wide-ep-glm-aggregated.yaml` — the same GLM wide-EP but **aggregated** (one pool does both phases, no P/D, no sidecar/NIXL).
 - `examples/values-modelexpress.yaml` — ModelExpress P2P weight transfer via the chart-native `modelExpress` knob.
 - `examples/values-existing-pvc.yaml` — load weights from an existing PVC, offline.
 - `examples/values-bring-your-own.yaml` — existing SA + hardened pod.
