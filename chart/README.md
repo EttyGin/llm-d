@@ -122,6 +122,7 @@ To **remove** a default arg (not just override it), edit `decode.spec.args` in
 - `examples/values-wide-ep-lws.yaml` — wide expert parallelism as `LeaderWorkerSet` (multi-node DP).
 - `examples/values-wide-ep.yaml` — the same wide-EP as a single-node `Deployment` (no LWS).
 - `examples/values-lws-minikube.yaml` — a size=1 `LeaderWorkerSet` that actually runs on a CPU minikube (LWS smoke test).
+- `examples/values-wide-ep-glm.yaml` — single-node wide-EP (no LWS) for `zai-org/GLM-5.2-FP8`.
 - `examples/values-existing-pvc.yaml` — load weights from an existing PVC, offline.
 - `examples/values-bring-your-own.yaml` — existing SA + hardened pod.
 - `examples/values-observability.yaml` — add distributed tracing.
