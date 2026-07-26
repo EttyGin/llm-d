@@ -64,6 +64,8 @@ spec:
       {{- /* Start from your verbatim patch spec, then fold in the additive knobs. */}}
       {{- $ps := omit (deepCopy (dig "spec" "template" "spec" dict $d)) "serviceAccountName" }}
       {{- $cname := $d.containerName | default "modelserver" }}
+      {{- $me := $d.modelExpress | default dict }}
+      {{- $meImage := "" }}
       {{- $containers := list }}
       {{- range $c := ($ps.containers | default list) }}
         {{- if eq ($c.name | default "") $cname }}
@@ -72,10 +74,33 @@ spec:
           {{- with $d.extraVolumeMounts }}{{- $_ := set $c "volumeMounts" (concat ($c.volumeMounts | default list) .) }}{{- end }}
           {{- with $d.containerSecurityContext }}{{- $_ := set $c "securityContext" . }}{{- end }}
           {{- if and $d.image $d.image.repository }}{{- $_ := set $c "image" (printf "%s:%s" $d.image.repository ($d.image.tag | default "latest")) }}{{- end }}
+          {{- /* ModelExpress: address env + --load-format + a shared install dir on the target container. */}}
+          {{- if $me.enabled }}
+            {{- $meEnv := list }}
+            {{- with $me.serverAddress }}
+              {{- $meEnv = append $meEnv (dict "name" "MODEL_EXPRESS_URL" "value" .) }}
+              {{- $meEnv = append $meEnv (dict "name" "MX_SERVER_ADDRESS" "value" .) }}
+            {{- end }}
+            {{- if $me.artifactTransfer }}{{- $meEnv = append $meEnv (dict "name" "MX_ARTIFACT_TRANSFER" "value" "1") }}{{- end }}
+            {{- if $me.install }}{{- $meEnv = append $meEnv (dict "name" "PYTHONPATH" "value" "/mx-client") }}{{- end }}
+            {{- with $me.extraEnv }}{{- $meEnv = concat $meEnv . }}{{- end }}
+            {{- $_ := set $c "env" (concat ($c.env | default list) $meEnv) }}
+            {{- with $me.loadFormat }}{{- $_ := set $c "args" (concat ($c.args | default list) (list (printf "--load-format=%s" .))) }}{{- end }}
+            {{- if $me.install }}{{- $_ := set $c "volumeMounts" (concat ($c.volumeMounts | default list) (list (dict "name" "mx-client" "mountPath" "/mx-client"))) }}{{- end }}
+            {{- $meImage = ($c.image | default "") }}
+          {{- end }}
         {{- end }}
         {{- $containers = append $containers $c }}
       {{- end }}
       {{- $_ := set $ps "containers" $containers }}
+      {{- /* ModelExpress install: an init container that pip-installs the client into the shared dir BEFORE the server starts. */}}
+      {{- if and $me.enabled $me.install }}
+        {{- $meImg := $me.installImage | default $meImage }}
+        {{- if not $meImg }}{{- fail (printf "modelExpress.install is on but no image resolved for container %q — set an image on it or modelExpress.installImage" $cname) }}{{- end }}
+        {{- $meInit := dict "name" "modelexpress-install" "image" $meImg "imagePullPolicy" "IfNotPresent" "command" (list "sh" "-c" (printf "pip install --target=/mx-client %s" ($me.package | default "modelexpress"))) "volumeMounts" (list (dict "name" "mx-client" "mountPath" "/mx-client")) }}
+        {{- $_ := set $ps "initContainers" (concat ($ps.initContainers | default list) (list $meInit)) }}
+        {{- $_ := set $ps "volumes" (concat ($ps.volumes | default list) (list (dict "name" "mx-client" "emptyDir" (dict)))) }}
+      {{- end }}
       {{- with $d.extraVolumes }}{{- $_ := set $ps "volumes" (concat ($ps.volumes | default list) .) }}{{- end }}
       {{- with $d.podSecurityContext }}{{- $_ := set $ps "securityContext" . }}{{- end }}
       {{- with $d.imagePullSecrets }}{{- $_ := set $ps "imagePullSecrets" . }}{{- end }}

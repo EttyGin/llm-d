@@ -109,6 +109,7 @@ The modelserver's native additive knobs (no need to restate `decode.spec`), unde
 | Autoscaling (KEDA)          | `autoscaling.keda.enabled: true` **+ `eppServiceName: <release>-epp`** |
 | P/D prefill role            | `prefill.enabled: true` + `prefill.*` (mirrors every `decode.*` knob) — see the P/D section |
 | Workload type               | `decode.workload` / `prefill.workload`: `deployment` (default) or `leaderWorkerSet` (wide-EP / multi-node DP; needs the LWS controller) |
+| ModelExpress P2P transfer   | `decode.modelExpress.enabled` (+ `prefill.modelExpress`): init container `pip install`s the client before serve, appends `--load-format=mx`, sets `MODEL_EXPRESS_URL` + `MX_SERVER_ADDRESS` — see the ModelExpress section |
 | Image tag (all vLLM images) | `identity.vllmVersion` (shared tag; `decode.image`/`prefill.image` override repo+tag per role) |
 
 To **remove** a default arg (not just override it), edit `decode.spec.args` in
@@ -122,7 +123,8 @@ To **remove** a default arg (not just override it), edit `decode.spec.args` in
 - `examples/values-wide-ep-lws.yaml` — wide expert parallelism as `LeaderWorkerSet` (multi-node DP).
 - `examples/values-wide-ep.yaml` — the same wide-EP as a single-node `Deployment` (no LWS).
 - `examples/values-lws-minikube.yaml` — a size=1 `LeaderWorkerSet` that actually runs on a CPU minikube (LWS smoke test).
-- `examples/values-wide-ep-glm.yaml` — single-node wide-EP (no LWS) for `zai-org/GLM-5.2-FP8`.
+- `examples/values-wide-ep-glm.yaml` — single-node wide-EP (no LWS) for `zai-org/GLM-5.2-FP8` (manual `pip install modelexpress` in the launch script).
+- `examples/values-modelexpress.yaml` — ModelExpress P2P weight transfer via the chart-native `modelExpress` knob.
 - `examples/values-existing-pvc.yaml` — load weights from an existing PVC, offline.
 - `examples/values-bring-your-own.yaml` — existing SA + hardened pod.
 - `examples/values-observability.yaml` — add distributed tracing.
@@ -161,6 +163,36 @@ its own version track (pinned separately, not `vllmVersion`). Prometheus metrics
 extend to prefill (a role-aware PodMonitor); **prefill autoscaling** is left to
 WVA / a hand-authored trigger (the chart's KEDA ScaledObject stays decode-only —
 see the note in `values.yaml`). Production needs an RDMA (IB/RoCE) interconnect.
+
+## ModelExpress (P2P weight transfer)
+
+[ModelExpress](https://github.com/ai-dynamo/modelexpress) lets a new replica pull
+model weights (and compatible JIT caches) over RDMA from a Ready replica instead
+of re-loading from disk/HF — faster warm-up when scaling out large models. Set
+`decode.modelExpress.enabled: true` (and/or `prefill.modelExpress`) and the chart
+wires the server the way `modelexpress/examples/dynamo_p2p_transfer_k8s/vllm`
+(single node) does:
+
+- an **init container** `pip install`s the client into a shared dir **before** the
+  server starts, exposed to it via `PYTHONPATH=/mx-client` (reusing the server's
+  own image, so the Python env matches; override with `modelExpress.installImage`);
+- **`--load-format=<loadFormat>`** (default `mx`) is appended to the server args;
+- the two address env vars **`MODEL_EXPRESS_URL`** and **`MX_SERVER_ADDRESS`** are
+  both set to `modelExpress.serverAddress` (Dynamo reads the former, MX is
+  standardizing on the latter; the plugin accepts either).
+
+The ModelExpress **server** itself is not created by this chart — run it separately
+and point `serverAddress` at its Service. vLLM 0.23.0+ recognizes the `mx` /
+`modelexpress` load format natively; on older vLLM add `VLLM_PLUGINS=modelexpress`
+via `modelExpress.extraEnv`. See `examples/values-modelexpress.yaml`.
+
+> **Direct-exec only for `--load-format`.** The flag is *appended to args*, so the
+> target container must use `command: [vllm, serve]` with args as vLLM flags. If
+> your container runs a **shell script** (`command: [bash, -c]`), put
+> `--load-format mx` inside the script and set `modelExpress.loadFormat: ""` (env +
+> the install init container still apply). `examples/values-wide-ep-glm.yaml` takes
+> the fully-manual route instead: a plain `pip install modelexpress` line in its
+> launch script.
 
 ## Caveats
 

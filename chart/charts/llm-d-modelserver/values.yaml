@@ -81,6 +81,27 @@ decode:
   leaderWorkerSet:
     size: 2                      # leader + (size-1) workers per replica
 
+  # ---- ModelExpress P2P weight/JIT-cache transfer (optional) ----
+  # When enabled, the chart wires the server for ModelExpress the same way as
+  # modelexpress/examples/dynamo_p2p_transfer_k8s/vllm (single node):
+  #   - an init container `pip install`s the client into a shared dir BEFORE the
+  #     server starts, exposed to it via PYTHONPATH=/mx-client;
+  #   - `--load-format=<loadFormat>` is appended to the server args;
+  #   - the two address env vars (MODEL_EXPRESS_URL + MX_SERVER_ADDRESS) are set.
+  # NOTE: --load-format is appended as a flag, so the target container must be a
+  # direct-exec `command: [vllm, serve]` with args as vLLM flags. For a shell
+  # script container (command: [bash, -c]), bake `--load-format mx` into the
+  # script yourself and set loadFormat: "" here.
+  modelExpress:
+    enabled: false
+    serverAddress: ""        # host:port of the ModelExpress server → MODEL_EXPRESS_URL + MX_SERVER_ADDRESS
+    loadFormat: mx           # appended as --load-format=<v> (mx | modelexpress); "" to skip
+    install: true            # pip install the client in an init container before the server starts
+    package: modelexpress    # pip package (add ==x.y.z to pin)
+    installImage: ""         # image for the install init container (default: the server container's image)
+    artifactTransfer: true   # sets MX_ARTIFACT_TRANSFER=1
+    extraEnv: []             # extra MX_*/UCX_*/NIXL_* env from the guide (e.g. MX_ARTIFACT_READY_URL)
+
   # ---- The verbatim patch (== patch-vllm.yaml `spec:`) ----
   spec:
     replicas: 1
@@ -217,6 +238,17 @@ prefill:
   workload: deployment
   leaderWorkerSet:
     size: 2                      # leader + (size-1) workers per replica
+
+  # Same ModelExpress knob as decode (see decode.modelExpress above).
+  modelExpress:
+    enabled: false
+    serverAddress: ""
+    loadFormat: mx
+    install: true
+    package: modelexpress
+    installImage: ""
+    artifactTransfer: true
+    extraEnv: []
 
   # Lean placeholder spec — provide the real P/D prefill spec (NIXL kv-transfer
   # config, VLLM_NIXL_SIDE_CHANNEL_HOST, the nixl port) via your values; the PD

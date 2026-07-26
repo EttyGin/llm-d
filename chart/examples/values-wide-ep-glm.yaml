@@ -21,6 +21,7 @@ _widx:
   # Single-node launch — all DP local, no leader address, no Ray.
   script: &script |-
     find /dev/shm -type f -delete
+    pip install modelexpress          # install the client before the server starts
     exec vllm serve zai-org/GLM-5.2-FP8 \
       --port 8200 \
       --disable-access-log-for-endpoints=/health,/metrics \
