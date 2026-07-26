@@ -108,6 +108,7 @@ The modelserver's native additive knobs (no need to restate `decode.spec`), unde
 | Extra volumes / mounts      | `decode.extraVolumes`, `decode.extraVolumeMounts`                |
 | Autoscaling (KEDA)          | `autoscaling.keda.enabled: true` **+ `eppServiceName: <release>-epp`** |
 | P/D prefill role            | `prefill.enabled: true` + `prefill.*` (mirrors every `decode.*` knob) — see the P/D section |
+| Workload type               | `decode.workload` / `prefill.workload`: `deployment` (default) or `leaderWorkerSet` (wide-EP / multi-node DP; needs the LWS controller) |
 | Image tag (all vLLM images) | `identity.vllmVersion` (shared tag; `decode.image`/`prefill.image` override repo+tag per role) |
 
 To **remove** a default arg (not just override it), edit `decode.spec.args` in
@@ -118,6 +119,8 @@ To **remove** a default arg (not just override it), edit `decode.spec.args` in
 - `examples/values-optimized-baseline.yaml` — prefix-cache-affinity routing.
 - `examples/values-precise-prefix-cache-routing.yaml` — precise (kv-events) routing.
 - `examples/values-pd-disaggregation.yaml` — full prefill/decode disaggregation (see the P/D section).
+- `examples/values-wide-ep-lws.yaml` — wide expert parallelism as `LeaderWorkerSet` (multi-node DP).
+- `examples/values-wide-ep.yaml` — the same wide-EP as a single-node `Deployment` (no LWS).
 - `examples/values-existing-pvc.yaml` — load weights from an existing PVC, offline.
 - `examples/values-bring-your-own.yaml` — existing SA + hardened pod.
 - `examples/values-observability.yaml` — add distributed tracing.

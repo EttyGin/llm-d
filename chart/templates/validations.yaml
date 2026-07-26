@@ -33,7 +33,7 @@ runtime. Keep this file free of any real Kubernetes output.
 {{- end }}
 {{- $args = concat $args (dig "decode" "extraArgs" list $ms) -}}
 {{- $hasPortShift := false -}}
-{{- range $a := $args }}{{- if hasPrefix "--port" (toString $a) }}{{- $hasPortShift = true }}{{- end }}{{- end }}
+{{- range $a := $args }}{{- if contains "--port" (toString $a) }}{{- $hasPortShift = true }}{{- end }}{{- end }}
 {{- if not $hasSidecar }}
 {{- fail "llm-d-modelserver.prefill.enabled is true (P/D mode) but decode.spec has NO routing-proxy sidecar. Add the sidecar (a native initContainer, restartPolicy: Always) to llm-d-modelserver.decode.spec — see examples/values-pd-disaggregation.yaml." }}
 {{- end }}

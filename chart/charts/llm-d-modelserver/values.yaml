@@ -74,6 +74,12 @@ decode:
   # chart builds "<repository>:<tag>" and overrides the image in decode.spec —
   # lets a parent chart single-source the tag while keeping decode.spec verbatim.
   image: {}                    # e.g. { repository: vllm/vllm-openai, tag: v0.23.0 }
+  # Workload type: deployment (default) or leaderWorkerSet (wide-EP / multi-node
+  # DP — needs the LeaderWorkerSet controller). In LWS mode the authored `spec`
+  # (below) becomes the workerTemplate pod spec; replicas comes from spec.replicas.
+  workload: deployment
+  leaderWorkerSet:
+    size: 2                      # leader + (size-1) workers per replica
 
   # ---- The verbatim patch (== patch-vllm.yaml `spec:`) ----
   spec:
@@ -205,6 +211,12 @@ prefill:
   podSecurityContext: {}
   imagePullSecrets: []
   image: {}                    # e.g. { repository: vllm/vllm-openai, tag: v0.23.0 }
+  # Workload type: deployment (default) or leaderWorkerSet (wide-EP / multi-node
+  # DP — needs the LeaderWorkerSet controller). In LWS mode the authored `spec`
+  # (below) becomes the workerTemplate pod spec; replicas comes from spec.replicas.
+  workload: deployment
+  leaderWorkerSet:
+    size: 2                      # leader + (size-1) workers per replica
 
   # Lean placeholder spec — provide the real P/D prefill spec (NIXL kv-transfer
   # config, VLLM_NIXL_SIDE_CHANNEL_HOST, the nixl port) via your values; the PD
