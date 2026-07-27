@@ -98,8 +98,11 @@ llm-d-router:
         flags:
           v: 2
         resources:
-          requests: { cpu: "4", memory: 8Gi }
-          limits: { memory: 16Gi }
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            memory: 16Gi
         # ---- Plugin config: easy to control. Drop in a full EndpointPickerConfig.
         # DEFAULT = the most basic, generic load-aware routing: send each request
         # to the endpoint with the SHORTEST QUEUE and the LOWEST KV-CACHE usage
@@ -135,7 +138,9 @@ llm-d-router:
           tag: *vllmVersion
         port: 8000
         resources:            # shrink on small clusters (see the minikube values)
-          requests: { cpu: "4", memory: 8Gi }
+          requests:
+            cpu: "4"
+            memory: 8Gi
 
       # Gateway mode: the (external) Gateway's own proxy handles the data plane.
       proxy:
@@ -282,29 +287,41 @@ llm-d-modelserver:
                   memory: 96Gi
                   nvidia.com/gpu: 2
               startupProbe:
-                httpGet: { path: /v1/models, port: modelserver }
+                httpGet:
+                  path: /v1/models
+                  port: modelserver
                 initialDelaySeconds: 15
                 periodSeconds: 30
                 timeoutSeconds: 5
                 failureThreshold: 120
               livenessProbe:
-                httpGet: { path: /health, port: modelserver }
+                httpGet:
+                  path: /health
+                  port: modelserver
                 periodSeconds: 10
                 timeoutSeconds: 5
                 failureThreshold: 3
               readinessProbe:
-                httpGet: { path: /v1/models, port: modelserver }
+                httpGet:
+                  path: /v1/models
+                  port: modelserver
                 periodSeconds: 5
                 timeoutSeconds: 2
                 failureThreshold: 3
               volumeMounts:
-                - { name: shm, mountPath: /dev/shm }
-                - { name: cache, mountPath: /.cache }
-                - { name: triton-cache, mountPath: /.triton }
-                - { name: vllm-config, mountPath: /.config }
+                - name: shm
+                  mountPath: /dev/shm
+                - name: cache
+                  mountPath: /.cache
+                - name: triton-cache
+                  mountPath: /.triton
+                - name: vllm-config
+                  mountPath: /.config
           volumes:
             - name: shm
-              emptyDir: { medium: Memory, sizeLimit: 20Gi }
+              emptyDir:
+                medium: Memory
+                sizeLimit: 20Gi
             - name: cache
               emptyDir: {}
             - name: triton-cache
@@ -323,8 +340,12 @@ llm-d-modelserver:
       repository: vllm/vllm-openai-cpu
       tag: *vllmVersion
     resources:
-      requests: { cpu: "1", memory: 4Gi }
-      limits: { cpu: "4", memory: 12Gi }
+      requests:
+        cpu: "1"
+        memory: 4Gi
+      limits:
+        cpu: "4"
+        memory: 12Gi
 
   # Prometheus PodMonitor for decode — ON by default (matches the EPP
   # ServiceMonitor). REQUIRES the Prometheus Operator (PodMonitor CRD).
@@ -350,11 +371,15 @@ llm-d-modelserver:
         scaleUp:
           stabilizationWindowSeconds: 0
           policies:
-            - { type: Percent, value: 100, periodSeconds: 15 }
+            - type: Percent
+              value: 100
+              periodSeconds: 15
         scaleDown:
           stabilizationWindowSeconds: 300
           policies:
-            - { type: Percent, value: 100, periodSeconds: 15 }
+            - type: Percent
+              value: 100
+              periodSeconds: 15
       prometheus:
         serverAddress: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
         auth:
@@ -362,7 +387,9 @@ llm-d-modelserver:
           name: keda-prometheus-auth
           create: true
           secretTargetRef:
-            - { parameter: ca, name: keda-prometheus-auth, key: ca.crt }
+            - parameter: ca
+              name: keda-prometheus-auth
+              key: ca.crt
       # Triggers (each with its own THRESHOLD). {{ }} is templated by the chart:
       # .eppService -> <release>-epp, .Values.model.name -> the served model.
       triggers:
