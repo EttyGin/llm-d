@@ -18,44 +18,25 @@
 #
 # FP8: pre-quantized (compressed-tensors) — vLLM auto-detects it, no
 # --quantization flag. Needs FP8-capable GPUs (Hopper/H100+). Retune TP/DP/GPU
-# count to your node.
+# count to your node. accelerator defaults to gpu/nvidia. The launch script and
+# engine env are used once (one server), so they're inlined rather than hoisted;
+# only the model name — reused by model.name + tokenizer.modelName — is anchored.
 # =============================================================================
 _widx:
-  model:      &model      zai-org/GLM-5.2-FP8
-  modelLabel: &modelLabel GLM-5.2-FP8
-  # Single-node aggregated launch — all DP local, no leader address, no Ray, and
-  # NO kv-transfer config (nothing to hand off to; one engine does both phases).
-  script: &script |-
-    find /dev/shm -type f -delete
-    pip install modelexpress          # optional: drop if the image already has it
-    exec vllm serve zai-org/GLM-5.2-FP8 \
-      --port 8000 \
-      --disable-access-log-for-endpoints=/health,/metrics \
-      --enable-expert-parallel \
-      --tensor-parallel-size $TP_SIZE \
-      --max-num-batched-tokens ${MAX_TOKENS} --max-num-seqs ${MAX_TOKENS} \
-      --data-parallel-size $DP_SIZE_LOCAL \
-      --data-parallel-size-local $DP_SIZE_LOCAL \
-      --all2all-backend deepep_low_latency --moe-backend deep_gemm
-
-_env: &wideEpEnv
-  - { name: TP_SIZE, value: "1" }
-  - { name: DP_SIZE_LOCAL, value: "8" }
-  - { name: MAX_TOKENS, value: "8192" }
-  - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: llm-d-hf-token, key: HF_TOKEN } } }
-  # + NVSHMEM_*, NCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME, VLLM_USE_DEEP_GEMM, …
+  model: &model zai-org/GLM-5.2-FP8   # model.name + router tokenizer.modelName
 
 llm-d-modelserver:
-  model: { name: *model, label: *modelLabel }
+  model:
+    name: *model
+    label: GLM-5.2-FP8
   guideLabel: wide-ep-agg
-  accelerator: { variant: gpu, vendor: nvidia }
 
   # ONE aggregated server — prefill stays OFF (aggregated: role prefill-decode).
   decode:
-    enabled: true
-    workload: deployment
     containerName: vllm
-    image: { repository: ghcr.io/llm-d/llm-d-cuda-dev, tag: sha-a1bcf21 }
+    image:
+      repository: ghcr.io/llm-d/llm-d-cuda-dev
+      tag: sha-a1bcf21
     spec:
       replicas: 1
       template:
@@ -63,35 +44,75 @@ llm-d-modelserver:
           containers:
             - name: vllm
               command: ["/bin/bash", "-c"]
-              args: [*script]
-              env: *wideEpEnv
+              # Single-node aggregated launch — all DP local, no leader address,
+              # no Ray, and NO kv-transfer config (one engine does both phases).
+              args:
+                - |-
+                  find /dev/shm -type f -delete
+                  pip install modelexpress          # optional: drop if the image already has it
+                  exec vllm serve zai-org/GLM-5.2-FP8 \
+                    --port 8000 \
+                    --disable-access-log-for-endpoints=/health,/metrics \
+                    --enable-expert-parallel \
+                    --tensor-parallel-size $TP_SIZE \
+                    --max-num-batched-tokens ${MAX_TOKENS} --max-num-seqs ${MAX_TOKENS} \
+                    --data-parallel-size $DP_SIZE_LOCAL \
+                    --data-parallel-size-local $DP_SIZE_LOCAL \
+                    --all2all-backend deepep_low_latency --moe-backend deep_gemm
+              env:
+                - name: TP_SIZE
+                  value: "1"
+                - name: DP_SIZE_LOCAL
+                  value: "8"
+                - name: MAX_TOKENS
+                  value: "8192"
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: llm-d-hf-token
+                      key: HF_TOKEN
+                # + NVSHMEM_*, NCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME, VLLM_USE_DEEP_GEMM, …
               ports:
-                - { name: vllm, containerPort: 8000, protocol: TCP }
+                - name: vllm
+                  containerPort: 8000
+                  protocol: TCP
               resources:
-                limits: { nvidia.com/gpu: "8", memory: 512Gi, ephemeral-storage: 1Ti }
+                limits:
+                  nvidia.com/gpu: "8"
+                  memory: 512Gi
+                  ephemeral-storage: 1Ti
               startupProbe:
-                httpGet: { path: /v1/models, port: vllm }
+                httpGet:
+                  path: /v1/models
+                  port: vllm
                 initialDelaySeconds: 30
                 periodSeconds: 30
                 timeoutSeconds: 5
                 failureThreshold: 120
               readinessProbe:
-                httpGet: { path: /v1/models, port: vllm }
+                httpGet:
+                  path: /v1/models
+                  port: vllm
                 periodSeconds: 5
                 timeoutSeconds: 2
                 failureThreshold: 3
               volumeMounts:
-                - { name: shm, mountPath: /dev/shm }
+                - name: shm
+                  mountPath: /dev/shm
           volumes:
             - name: shm
-              emptyDir: { medium: Memory, sizeLimit: 40Gi }
+              emptyDir:
+                medium: Memory
+                sizeLimit: 40Gi
 
   # prefill: intentionally absent → aggregated (prefill.enabled defaults false).
 
 llm-d-router:
   llmd:
     router:
-      tokenizer: { enabled: true, modelName: *model }
+      tokenizer:
+        enabled: true
+        modelName: *model
       modelServers:
         matchLabels:
           llm-d.ai/guide: "wide-ep-agg"

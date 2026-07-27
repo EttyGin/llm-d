@@ -16,18 +16,17 @@
 # point serverAddress at its Service (see the guide's ModelExpress service block).
 # vLLM 0.23.0+ recognizes the `mx`/`modelexpress` load format natively; on older
 # vLLM add VLLM_PLUGINS=modelexpress via modelExpress.extraEnv.
+#
+# The gateway name and HF secret name are the chart defaults, so they aren't
+# restated here; accelerator defaults to gpu/nvidia.
 # =============================================================================
 identity:
-  model:      &model      Qwen/Qwen2.5-0.5B-Instruct
-  modelLabel: &modelLabel Qwen2.5-0.5B-Instruct
-  guide:      &guide      modelexpress
-  gateway:    &gwName     llm-d-inference-gateway
-  hfTokenSecretName: &hfSecret llm-d-hf-token
+  model: &model Qwen/Qwen2.5-0.5B-Instruct       # model.name + the vLLM serve args
+  modelLabel: &modelLabel Qwen2.5-0.5B-Instruct  # model.label + InferencePool matchLabels
+  guide: &guide modelexpress                      # guideLabel + InferencePool matchLabels
 
 llm-d-router:
   llmd:
-    httpRoute:
-      inferenceGatewayName: *gwName
     router:
       modelServers:
         matchLabels:
@@ -35,10 +34,10 @@ llm-d-router:
           llm-d.ai/model: *modelLabel
 
 llm-d-modelserver:
-  model: { name: *model, label: *modelLabel }
+  model:
+    name: *model
+    label: *modelLabel
   guideLabel: *guide
-  accelerator: { variant: gpu, vendor: nvidia }
-  hfTokenSecret: { enabled: true, name: *hfSecret, key: HF_TOKEN }
 
   decode:
     # ── the whole feature ──────────────────────────────────────────────
@@ -50,9 +49,12 @@ llm-d-modelserver:
       package: modelexpress
       # Publish caches only after vLLM's health endpoint is up (from the guide):
       extraEnv:
-        - { name: MX_ARTIFACT_READY_URL, value: "http://127.0.0.1:8000/health" }
+        - name: MX_ARTIFACT_READY_URL
+          value: "http://127.0.0.1:8000/health"
     # ───────────────────────────────────────────────────────────────────
-    image: { repository: ghcr.io/llm-d/llm-d-cuda-dev, tag: sha-a1bcf21 }
+    image:
+      repository: ghcr.io/llm-d/llm-d-cuda-dev
+      tag: sha-a1bcf21
     spec:
       replicas: 1
       template:
@@ -67,16 +69,26 @@ llm-d-modelserver:
                 - --tensor-parallel-size=1
                 - --trust-remote-code
               env:
-                - { name: HF_HOME, value: /models }
+                - name: HF_HOME
+                  value: /models
                 - name: HF_TOKEN
                   valueFrom:
-                    secretKeyRef: { name: *hfSecret, key: HF_TOKEN }
+                    secretKeyRef:
+                      name: llm-d-hf-token
+                      key: HF_TOKEN
               ports:
-                - { name: modelserver, containerPort: 8000, protocol: TCP }
+                - name: modelserver
+                  containerPort: 8000
+                  protocol: TCP
               resources:
-                limits: { nvidia.com/gpu: "1", memory: 32Gi }
+                limits:
+                  nvidia.com/gpu: "1"
+                  memory: 32Gi
               volumeMounts:
-                - { name: shm, mountPath: /dev/shm }
+                - name: shm
+                  mountPath: /dev/shm
           volumes:
             - name: shm
-              emptyDir: { medium: Memory, sizeLimit: 8Gi }
+              emptyDir:
+                medium: Memory
+                sizeLimit: 8Gi

@@ -17,31 +17,29 @@
 #   any of that is missing while prefill.enabled is true.
 #
 # PRODUCTION: needs an RDMA interconnect (IB/RoCE). Without it, NIXL falls back
-# to TCP — dev/test only.
+# to TCP — dev/test only. Only the reused values (model, vLLM tag) are hoisted
+# into _pd; the single-use model label and sidecar image are inlined.
 # =============================================================================
-
 _pd:
-  model:        &model        openai/gpt-oss-120b
-  modelLabel:   &modelLabel   gpt-oss-120b
+  model: &model openai/gpt-oss-120b   # prefill/decode serve args + model.name + tokenizer.modelName
   # vLLM tag — shared by prefill + decode engine images (GPU vllm-openai). The
   # standard PD guide uses vanilla vllm/vllm-openai, same track as vllmVersion.
   # (If you hit NIXL/UCX issues (#545) and need ghcr.io/llm-d/llm-d-cuda, that is
   #  a SEPARATE version track — set decode.image/prefill.image explicitly then.)
-  vllmTag:      &vllmTag      v0.23.0
-  # Routing-proxy sidecar — a THIRD image on its OWN version track (NOT vLLM).
-  # Pinned and named here so it's visible, not buried in decode.spec.
-  sidecarImage: &sidecarImage ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.9.0
+  vllmTag: &vllmTag v0.23.0
 
 llm-d-modelserver:
   model:
     name: *model
-    label: *modelLabel
+    label: gpt-oss-120b
   guideLabel: pd-disaggregation
 
   # ---- Prefill role (P) ----
   prefill:
     enabled: true
-    image: { repository: vllm/vllm-openai, tag: *vllmTag }
+    image:
+      repository: vllm/vllm-openai
+      tag: *vllmTag
     spec:
       replicas: 8
       template:
@@ -62,27 +60,46 @@ llm-d-modelserver:
               env:
                 - name: HF_TOKEN
                   valueFrom:
-                    secretKeyRef: { name: llm-d-hf-token, key: HF_TOKEN }
+                    secretKeyRef:
+                      name: llm-d-hf-token
+                      key: HF_TOKEN
                 - name: VLLM_NIXL_SIDE_CHANNEL_HOST
                   valueFrom:
-                    fieldRef: { fieldPath: status.podIP }
+                    fieldRef:
+                      fieldPath: status.podIP
                 # vLLM keep-alive must be >= sidecar idle timeout (90s).
                 - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
                   value: "120"
               ports:
-                - { name: modelserver, containerPort: 8000, protocol: TCP }
-                - { name: nixl, containerPort: 5600, protocol: TCP }
+                - name: modelserver
+                  containerPort: 8000
+                  protocol: TCP
+                - name: nixl
+                  containerPort: 5600
+                  protocol: TCP
               resources:
-                limits:   { cpu: "8", memory: 16Gi, nvidia.com/gpu: "1" }
-                requests: { cpu: "8", memory: 16Gi, nvidia.com/gpu: "1" }
+                limits:
+                  cpu: "8"
+                  memory: 16Gi
+                  nvidia.com/gpu: "1"
+                requests:
+                  cpu: "8"
+                  memory: 16Gi
+                  nvidia.com/gpu: "1"
               volumeMounts:
-                - { name: shm, mountPath: /dev/shm }
-                - { name: cache, mountPath: /.cache }
-                - { name: vllm-config, mountPath: /.config }
-                - { name: triton-cache, mountPath: /.triton }
+                - name: shm
+                  mountPath: /dev/shm
+                - name: cache
+                  mountPath: /.cache
+                - name: vllm-config
+                  mountPath: /.config
+                - name: triton-cache
+                  mountPath: /.triton
           volumes:
             - name: shm
-              emptyDir: { medium: Memory, sizeLimit: 20Gi }
+              emptyDir:
+                medium: Memory
+                sizeLimit: 20Gi
             - name: cache
               emptyDir: {}
             - name: vllm-config
@@ -92,8 +109,9 @@ llm-d-modelserver:
 
   # ---- Decode role (D) — mutated for P/D: sidecar + port 8200 + nixl + NIXL ----
   decode:
-    enabled: true
-    image: { repository: vllm/vllm-openai, tag: *vllmTag }
+    image:
+      repository: vllm/vllm-openai
+      tag: *vllmTag
     spec:
       replicas: 2
       template:
@@ -101,7 +119,7 @@ llm-d-modelserver:
           initContainers:
             # Routing-proxy sidecar (native sidecar: initContainer + Always).
             - name: routing-proxy
-              image: *sidecarImage
+              image: ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.9.0
               imagePullPolicy: Always
               restartPolicy: Always
               args:
@@ -111,7 +129,9 @@ llm-d-modelserver:
                 - --zap-log-level=1
                 - --secure-proxy=false
               ports:
-                - { name: sidecar, containerPort: 8000, protocol: TCP }
+                - name: sidecar
+                  containerPort: 8000
+                  protocol: TCP
               securityContext:
                 allowPrivilegeEscalation: false
                 runAsNonRoot: true
@@ -133,24 +153,43 @@ llm-d-modelserver:
               env:
                 - name: HF_TOKEN
                   valueFrom:
-                    secretKeyRef: { name: llm-d-hf-token, key: HF_TOKEN }
+                    secretKeyRef:
+                      name: llm-d-hf-token
+                      key: HF_TOKEN
                 - name: VLLM_NIXL_SIDE_CHANNEL_HOST
                   valueFrom:
-                    fieldRef: { fieldPath: status.podIP }
+                    fieldRef:
+                      fieldPath: status.podIP
               ports:
-                - { name: modelserver, containerPort: 8200, protocol: TCP }
-                - { name: nixl, containerPort: 5600, protocol: TCP }
+                - name: modelserver
+                  containerPort: 8200
+                  protocol: TCP
+                - name: nixl
+                  containerPort: 5600
+                  protocol: TCP
               resources:
-                limits:   { cpu: "16", memory: 64Gi, nvidia.com/gpu: "4" }
-                requests: { cpu: "16", memory: 64Gi, nvidia.com/gpu: "4" }
+                limits:
+                  cpu: "16"
+                  memory: 64Gi
+                  nvidia.com/gpu: "4"
+                requests:
+                  cpu: "16"
+                  memory: 64Gi
+                  nvidia.com/gpu: "4"
               volumeMounts:
-                - { name: shm, mountPath: /dev/shm }
-                - { name: cache, mountPath: /.cache }
-                - { name: vllm-config, mountPath: /.config }
-                - { name: triton-cache, mountPath: /.triton }
+                - name: shm
+                  mountPath: /dev/shm
+                - name: cache
+                  mountPath: /.cache
+                - name: vllm-config
+                  mountPath: /.config
+                - name: triton-cache
+                  mountPath: /.triton
           volumes:
             - name: shm
-              emptyDir: { medium: Memory, sizeLimit: 20Gi }
+              emptyDir:
+                medium: Memory
+                sizeLimit: 20Gi
             - name: cache
               emptyDir: {}
             - name: vllm-config
