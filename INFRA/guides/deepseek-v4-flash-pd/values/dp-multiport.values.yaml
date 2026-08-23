@@ -1,0 +1,21 @@
+## Multi-port external DP load balancing + per-rank KV-cache events.
+##
+## What it buys: the EPP addresses each DP rank as its own endpoint, so routing
+## decisions (prefix affinity, load) are made per rank rather than per pod, and
+## the router's PRECISE KV-event index becomes usable. Pair this with
+## ../router/precise-routing.values.yaml.
+##
+## HARD CONSTRAINT: the InferencePool exposes ONE targetPorts list for the whole
+## pool, so prefill and decode must expose the same number of rank ports.
+## Layer ./decode-dep8.values.yaml (or set prefill.dataParallelSize to match
+## decode) or the EPP will create endpoints for decode ranks that do not exist.
+##
+## Also requires an EPP build with per-rank KV-event attribution
+## (llm-d-router#2233) and GAIE >= v1.5.0 for multi-targetPort InferencePools.
+dp:
+  lbMode: multiport
+kvEvents:
+  enabled: true
+  basePort: 5557
+  # Must equal the router's tokenProcessorConfig.blockSizeTokens.
+  blockSize: 64

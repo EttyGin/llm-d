@@ -1,0 +1,7 @@
+## Disable DSpark speculative decoding.
+##
+## Speculation trades extra compute for lower per-token latency; it is a loss
+## when the fleet is already throughput-saturated. Turn it off to measure the
+## difference, or when the draft head misbehaves on your workload.
+speculative:
+  enabled: false

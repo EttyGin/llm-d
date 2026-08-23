@@ -1,0 +1,10 @@
+## No KV-cache offloading: NixlConnector alone, P/D transfer only.
+##
+## Use this to measure what offloading is actually buying you. It also
+## disables P2P sharing — the P2P tier lives inside the OffloadingConnector,
+## so there is nothing for a peer to pull from.
+offloading:
+  # Quoted: YAML 1.1 parses a bare `off` as the boolean false.
+  mode: "off"
+p2p:
+  enabled: false

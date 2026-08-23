@@ -1,0 +1,23 @@
+## Decode on 8 GPUs (DEP8) instead of 4.
+##
+## This is the fix for the capacity problem described in the README's
+## "Does it fit?" section: at EP4 each decode rank carries roughly a quarter of
+## the expert weights plus a full copy of the dense/attention weights, which
+## does not leave usable room for KV cache on an 80 GB H100. EP8 halves the
+## per-rank expert shard.
+##
+## Total GPUs with this layer: 8 prefill + 8 decode = 16.
+decode:
+  gpus: 8
+  dataParallelSize: 8
+  apiServerCount: 4
+  resources:
+    requests:
+      cpu: "64"
+      memory: 1200Gi
+      ephemeral-storage: 1Ti
+    limits:
+      cpu: "128"
+      memory: 1200Gi
+      ephemeral-storage: 1Ti
+  dshmSize: 800Gi

@@ -1,0 +1,180 @@
+## Router (EPP) overrides for the deepseek-v4-flash guide.
+## Layer on top of: INFRA/values/base.values.yaml
+##
+##   helm upgrade --install deepseek-v4-flash \
+##     oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v0.10.0 \
+##     -f INFRA/values/base.values.yaml \
+##     -f INFRA/guides/deepseek-v4-flash-pd/router/deepseek-v4-flash.values.yaml \
+##     -n ${NAMESPACE}
+##
+## The release name MUST be `deepseek-v4-flash` — it has to equal the model
+## server chart's `guideName`, because the InferencePool selector is built from
+## it and matches the llm-d.ai/guide label on the pods.
+##
+## WHAT THIS CONFIG DOES
+##
+## P/D disaggregation: `always-disagg-pd-decider` sends every request through
+## both legs. The `prefill` profile picks the pod that computes the prompt; the
+## `decode` profile picks the pod that generates. The decode pod's routing
+## sidecar performs the NIXL handoff between them.
+##
+## Prefix scoring is DUAL-TIER, mirroring the GLM-5.2 wide-EP overrides: a GPU
+## scorer (weight 5) and a CPU scorer (weight 2), so a pod that holds the prefix
+## in its CPU offload tier still scores above a cold pod — which is the whole
+## point of running the OffloadingConnector.
+##
+## P2P: `p2p-source-producer` names a peer that out-caches the scheduled prefill
+## pod by at least `minCachedTokenDelta` tokens. The sidecar turns that into
+## `kv_transfer_params.remote_kv_source` on the prefill call, and the engine
+## pulls the blocks from the peer's CPU tier instead of recomputing them.
+##
+## WHY THE APPROXIMATE INDEX AND NOT THE PRECISE ONE
+##
+## The model servers default to `dp.lbMode: internal` — one API server per pod,
+## vLLM balancing across local DP ranks. In that mode only DP rank 0's ZMQ
+## KV-event socket is reachable at the pod IP, so a precise index would see
+## 1/8th of the prefill fleet's cache and silently mis-score the rest. The
+## approximate producers model the cache from the router's own routing history
+## instead, which is rank-agnostic and therefore correct here.
+##
+## For the precise (KV-event-fed) index, deploy the model servers with
+## values/dp-multiport.values.yaml and install this chart with
+## router/precise-routing.values.yaml layered after this file.
+
+router:
+  extraServicePorts:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 8081
+
+  epp:
+    # Single replica: the approximate prefix index and the P2P source decision
+    # are built from each EPP process's own routing history. Two active
+    # replicas would each hold half the picture and disagree about which peer
+    # holds a prefix.
+    replicas: 1
+    flags:
+      # The chart auto-adds --ha-enable-leader-election when replicas > 1.
+      # No-op at replicas: 1; keeps the flag explicit if you scale up.
+      ha-enable-leader-election: false
+    env:
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: llm-d-hf-token
+            key: HF_TOKEN
+
+    # v0.9.0's tagged EPP predates the `p2p-source-producer` plugin and rejects
+    # this config with "plugin type 'p2p-source-producer' is not registered".
+    # This mirrors the pin the upstream p2p-kv-cache-sharing guide carries.
+    # `main` floats: resolve it to a digest before you benchmark.
+    image:
+      tag: main
+      pullPolicy: Always
+
+    pluginsConfigFile: "deepseek-v4-flash-plugins.yaml"
+    pluginsCustomConfig:
+      deepseek-v4-flash-plugins.yaml: |
+        apiVersion: llm-d.ai/v1alpha1
+        kind: EndpointPickerConfig
+        plugins:
+          # --- P/D control ---------------------------------------------------
+          - type: always-disagg-pd-decider
+          - type: disagg-profile-handler
+            parameters:
+              deciders:
+                prefill: always-disagg-pd-decider
+          - type: prefill-filter
+          - type: decode-filter
+
+          # --- tokenization --------------------------------------------------
+          # Renders prompts to token IDs against the prefill pods themselves
+          # (the chart's render Service). modelName must match the deployed
+          # model or the render call is rejected outright rather than silently
+          # tokenizing with the wrong vocabulary.
+          - type: token-producer
+            parameters:
+              modelName: deepseek-ai/DeepSeek-V4-Flash-0731
+              vllm:
+                url: "http://deepseek-v4-flash-render:8000"
+
+          # --- dual-tier prefix index ---------------------------------------
+          # GPU tier: auto-tuned, tracks blocks resident in HBM.
+          - type: approx-prefix-cache-producer
+            name: gpu-prefix-cache-producer
+          # CPU tier: fixed LRU sized for the offload tier. 200k entries per
+          # server is the GLM-5.2 recipe's value; raise it if your
+          # offloading.cpuBytes is much larger than 88 GiB per rank.
+          - type: approx-prefix-cache-producer
+            name: cpu-prefix-cache-producer
+            parameters:
+              autoTune: false
+              lruCapacityPerServer: 200000
+          - type: prefix-cache-scorer
+            name: gpu-prefix-cache-scorer
+            parameters:
+              prefixMatchInfoProducerName: gpu-prefix-cache-producer
+          - type: prefix-cache-scorer
+            name: cpu-prefix-cache-scorer
+            parameters:
+              prefixMatchInfoProducerName: cpu-prefix-cache-producer
+
+          # --- P2P KV cache sharing -----------------------------------------
+          # Names a peer for the prefill leg to pull from. `prefillProfileName`
+          # must be the P/D prefill profile below, so the source comparison
+          # runs against the pod that will actually compute the prefix.
+          - type: p2p-source-producer
+            parameters:
+              prefixMatchInfoProducerName: cpu-prefix-cache-producer
+              prefillProfileName: prefill
+              # Minimum extra cached-prefix tokens a peer must hold over the
+              # scheduled pod before a pull is requested. Set from the measured
+              # pull-vs-recompute crossover: 2048 on the p2p guide's
+              # gpt-oss-120b RDMA testbed, 12288 on the wide-EP GLM-5.2 one.
+              # DeepSeek-V4-Flash on H100 is neither — calibrate with
+              # guides/recipes/router/calibration/calibrate-min-cached-token-delta.sh
+              # against two live pods before trusting this number.
+              minCachedTokenDelta: 12288
+
+          # --- load ----------------------------------------------------------
+          - type: queue-scorer
+          - type: active-request-scorer
+          - type: kv-cache-utilization-scorer
+          - type: max-score-picker
+
+        schedulingProfiles:
+          # Prefill computes the prompt: follow the cache across both tiers,
+          # break ties on queue depth.
+          - name: prefill
+            plugins:
+              - pluginRef: prefill-filter
+              - pluginRef: gpu-prefix-cache-scorer
+                weight: 5
+              - pluginRef: cpu-prefix-cache-scorer
+                weight: 2
+              - pluginRef: queue-scorer
+                weight: 2
+              - pluginRef: active-request-scorer
+                weight: 1
+              - pluginRef: max-score-picker
+          # Decode is bound by concurrent in-flight requests and KV headroom,
+          # not by prefix reuse — the prefix arrives over NIXL either way.
+          - name: decode
+            plugins:
+              - pluginRef: decode-filter
+              - pluginRef: active-request-scorer
+                weight: 3
+              - pluginRef: kv-cache-utilization-scorer
+                weight: 2
+              - pluginRef: max-score-picker
+
+  modelServers:
+    type: vllm
+    # One port per pod: prefill exposes vLLM on 8000, decode exposes the
+    # routing sidecar on 8000. With dp.lbMode=multiport, replace this with the
+    # per-rank list in router/precise-routing.values.yaml.
+    targetPorts:
+      - number: 8000
+    matchLabels:
+      llm-d.ai/guide: "deepseek-v4-flash"

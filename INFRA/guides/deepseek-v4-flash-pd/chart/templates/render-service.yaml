@@ -1,0 +1,29 @@
+{{- if .Values.render.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.guideName }}-render
+  labels:
+    {{- include "dsv4.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vllm-render
+spec:
+  # This Service owns no pods. It fronts the PREFILL pods, which already serve
+  # /v1/*/render, so the router's token-producer tokenizes on the same engines
+  # that compute the prompt — render capacity scales with the prefill fleet.
+  #
+  # Decode pods are deliberately excluded: their port 8000 belongs to the
+  # routing sidecar, not to vLLM, so a render call there would be proxied as an
+  # inference request.
+  #
+  # Only Ready endpoints receive traffic, so render calls never reach a pod
+  # still loading weights — but until the first prefill pod is Ready this
+  # Service has no endpoints and token-producer calls fail. Deploy the model
+  # servers before pointing traffic at the router.
+  selector:
+    {{- include "dsv4.selectorLabels" (dict "root" . "role" "prefill") | nindent 4 }}
+  ports:
+    - name: render-http
+      port: {{ .Values.render.port }}
+      targetPort: {{ if eq .Values.dp.lbMode "multiport" }}dp0{{ else }}modelserver{{ end }}
+      protocol: TCP
+{{- end }}

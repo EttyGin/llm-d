@@ -1,0 +1,16 @@
+apiVersion: v2
+name: dsv4-flash-modelserver
+description: |
+  P/D-disaggregated DeepSeek-V4-Flash model servers for llm-d — wide expert
+  parallelism (DEP, TP=1) without LeaderWorkerSet, CPU KV-cache offloading,
+  and peer-to-peer KV cache sharing over NIXL.
+type: application
+version: 0.1.0
+appVersion: "v0.9.0"
+keywords:
+  - llm-d
+  - vllm
+  - pd-disaggregation
+  - wide-ep
+  - kv-cache-offloading
+  - p2p

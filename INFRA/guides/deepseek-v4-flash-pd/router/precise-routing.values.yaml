@@ -1,0 +1,137 @@
+## OPT-IN: replace the approximate prefix index with the precise, KV-event-fed
+## one. Layer AFTER router/deepseek-v4-flash.values.yaml:
+##
+##   helm upgrade --install deepseek-v4-flash \
+##     oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v0.10.0 \
+##     -f INFRA/values/base.values.yaml \
+##     -f .../router/deepseek-v4-flash.values.yaml \
+##     -f .../router/precise-routing.values.yaml \
+##     -n ${NAMESPACE}
+##
+## PREREQUISITES — all three, or the index stays empty and every endpoint
+## scores zero:
+##
+##  1. Model servers deployed with values/dp-multiport.values.yaml, so each DP
+##     rank is its own endpoint and publishes KV events on
+##     basePort + rank (5557, 5558, ...).
+##  2. Prefill and decode DP sizes equal — the InferencePool has a single
+##     targetPorts list. Layer values/decode-dep8.values.yaml.
+##  3. An EPP build with per-rank KV-event attribution (llm-d-router#2233) and
+##     GAIE >= v1.5.0 for multi-targetPort InferencePools.
+##
+## `blockSizeTokens` here MUST equal the engines' kvEvents.blockSize (64).
+## They are the same quantity viewed from two sides; a mismatch means no block
+## hash ever matches and the index silently stays empty.
+
+router:
+  epp:
+    pluginsCustomConfig:
+      deepseek-v4-flash-plugins.yaml: |
+        apiVersion: llm-d.ai/v1alpha1
+        kind: EndpointPickerConfig
+        plugins:
+          - type: always-disagg-pd-decider
+          - type: disagg-profile-handler
+            parameters:
+              deciders:
+                prefill: always-disagg-pd-decider
+          - type: prefill-filter
+          - type: decode-filter
+
+          - type: token-producer
+            parameters:
+              modelName: deepseek-ai/DeepSeek-V4-Flash-0731
+              vllm:
+                url: "http://deepseek-v4-flash-render:8000"
+
+          - type: endpoint-notification-source
+          - type: precise-prefix-cache-producer
+            parameters:
+              indexerConfig:
+                kvBlockIndexConfig:
+                  inMemoryConfig:
+                    # Per-key LRU of (endpoint, tier) holders. Size it at
+                    # (endpoints x tiers): 16 rank-endpoints x 2 tiers here,
+                    # rounded up. Too small and real holders evict, affinity
+                    # collapses to zero and the P2P source lookup finds no peer.
+                    podCacheSize: 64
+                  # Device-tier weights, mirroring the 5:2 GPU:CPU scorer
+                  # weights of the approximate config.
+                  kvCacheBackendConfigs:
+                    - name: gpu
+                      weight: 1.0
+                    - name: cpu
+                      weight: 0.4
+              tokenProcessorConfig:
+                # == the engines' kvEvents.blockSize.
+                blockSizeTokens: 64
+              # Seed predicted entries at decision time so a same-prefix
+              # follow-up hits without waiting for engine confirmation.
+              speculativeIndexing: true
+              kvEventsConfig:
+                topicFilter: "kv@"
+                concurrency: 8
+                discoverPods: true
+                podDiscoveryConfig:
+                  # == the engines' kvEvents.basePort. The EPP adds the rank.
+                  socketPort: 5557
+
+          - type: p2p-source-producer
+            parameters:
+              prefixMatchInfoProducerName: precise-prefix-cache-producer
+              prefillProfileName: prefill
+              minCachedTokenDelta: 12288
+
+          - type: inflight-load-producer
+            parameters:
+              prefixMatchInfoProducerName: precise-prefix-cache-producer
+          - type: prefix-cache-affinity-filter
+            parameters:
+              prefixMatchInfoProducerName: precise-prefix-cache-producer
+              inFlightLoadProducerName: inflight-load-producer
+              # UNCALIBRATED. This is the H200 GLM-5.2 DP8 value carried over
+              # as a placeholder; DeepSeek-V4-Flash on H100 will differ. Measure
+              # with guides/recipes/router/calibration/calibrate.sh through the
+              # full P/D path before relying on the gate — too high and
+              # saturated pods never get bypassed, too low and affinity never
+              # engages.
+              peakPrefillThroughput: 3585
+          - type: token-load-scorer
+          - type: active-request-scorer
+          - type: kv-cache-utilization-scorer
+          - type: max-score-picker
+
+        dataLayer:
+          sources:
+            - pluginRef: endpoint-notification-source
+              extractors:
+                - pluginRef: precise-prefix-cache-producer
+
+        schedulingProfiles:
+          - name: prefill
+            plugins:
+              - pluginRef: prefill-filter
+              - pluginRef: prefix-cache-affinity-filter
+              - pluginRef: token-load-scorer
+              - pluginRef: max-score-picker
+          - name: decode
+            plugins:
+              - pluginRef: decode-filter
+              - pluginRef: active-request-scorer
+                weight: 3
+              - pluginRef: kv-cache-utilization-scorer
+                weight: 2
+              - pluginRef: max-score-picker
+
+  modelServers:
+    # Per-rank endpoints. This list must cover BOTH legs' rank counts, which is
+    # why prefill and decode DP sizes have to match in this mode.
+    targetPorts:
+      - number: 8000
+      - number: 8001
+      - number: 8002
+      - number: 8003
+      - number: 8004
+      - number: 8005
+      - number: 8006
+      - number: 8007

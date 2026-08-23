@@ -1,0 +1,209 @@
+{{- $cfg := .Values.decode -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-decode
+  labels:
+    {{- include "dsv4.labels" . | nindent 4 }}
+    llm-d.ai/role: decode
+spec:
+  replicas: {{ $cfg.replicas }}
+  selector:
+    matchLabels:
+      {{- include "dsv4.selectorLabels" (dict "root" . "role" "decode") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dsv4.labels" . | nindent 8 }}
+        {{- include "dsv4.selectorLabels" (dict "root" . "role" "decode") | nindent 8 }}
+        llm-d.ai/inference-serving: "true"
+    spec:
+      serviceAccountName: {{ include "dsv4.serviceAccountName" . }}
+      {{- with $cfg.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cfg.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The routing sidecar is a native sidecar (initContainer with
+      # restartPolicy: Always): it must be up before the engine accepts traffic
+      # and must stay up for the pod's lifetime.
+      initContainers:
+        - name: routing-proxy
+          image: "{{ .Values.sidecar.repository }}:{{ .Values.sidecar.tag }}"
+          imagePullPolicy: {{ .Values.sidecar.pullPolicy }}
+          restartPolicy: Always
+          args:
+            - "--port=8000"
+            - "--vllm-port={{ $cfg.enginePort }}"
+            {{- if eq .Values.dp.lbMode "multiport" }}
+            - "--data-parallel-size={{ $cfg.dataParallelSize }}"
+            {{- end }}
+            - "--kv-connector=nixlv2"
+            {{- if .Values.p2p.enabled }}
+            # Only valid with --kv-connector=nixlv2: makes the sidecar honour
+            # the EPP's KV-cache-source header and inject
+            # kv_transfer_params.remote_kv_source into the prefill call.
+            - "--enable-p2p-pull"
+            - "--p2p-connector-port={{ .Values.p2p.port }}"
+            {{- end }}
+            - "--zap-log-level={{ .Values.sidecar.logLevel }}"
+            - "--secure-proxy=false"
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            {{- if eq .Values.dp.lbMode "multiport" }}
+            {{- range $i := until (int $cfg.dataParallelSize) }}
+            - name: rank{{ $i }}
+              containerPort: {{ add 8000 $i }}
+              protocol: TCP
+            {{- end }}
+            {{- else }}
+            - name: sidecar
+              containerPort: 8000
+              protocol: TCP
+            {{- end }}
+          resources: {}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $cfg.dshmSize }}
+        - name: hf-cache
+          emptyDir: {}
+        - name: jit-cache
+          emptyDir: {}
+        - name: vllm-config
+          emptyDir: {}
+        {{- if eq (toString .Values.offloading.mode) "tiered" }}
+        - name: nvme-cache
+          hostPath:
+            path: {{ .Values.offloading.nvmeHostPath }}
+            type: DirectoryOrCreate
+        {{- end }}
+      containers:
+        - name: vllm
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RAWIO
+          command: ["sh", "-c", "rm -f /dev/shm/vllm_offload_*.mmap 2>/dev/null; exec vllm serve \"$@\"", "sh"]
+          args:
+            {{- include "dsv4.vllmArgs" (dict "root" . "role" "decode" "cfg" $cfg "port" $cfg.enginePort) | nindent 12 }}
+            {{- if .Values.kvEvents.enabled }}
+            - "--kv-events-config"
+            - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:{{ .Values.kvEvents.basePort }}","topic":"kv@$(POD_IP):8000@{{ .Values.model.name }}"}'
+            {{- end }}
+          env:
+            {{- include "dsv4.commonEnv" (dict "root" . "role" "decode") | nindent 12 }}
+            # DeepEP low-latency requires qp_depth >= (max_dispatch_tokens+1)*2.
+            - name: NVSHMEM_QP_DEPTH
+              value: {{ mul (add (int $cfg.maxNumSeqs) 1) 2 | quote }}
+            {{- with $cfg.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            {{- if eq .Values.dp.lbMode "multiport" }}
+            {{- range $i := until (int $cfg.dataParallelSize) }}
+            - name: vllm-rank{{ $i }}
+              containerPort: {{ add ($cfg.enginePort | int) $i }}
+              protocol: TCP
+            {{- end }}
+            - name: supervisor
+              containerPort: 8208
+              protocol: TCP
+            {{- else }}
+            - name: engine
+              containerPort: {{ $cfg.enginePort }}
+              protocol: TCP
+            {{- end }}
+            - name: nixl
+              containerPort: 5600
+              protocol: TCP
+            {{- if .Values.p2p.enabled }}
+            - name: p2p
+              containerPort: {{ .Values.p2p.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.kvEvents.enabled }}
+            {{- range $i := until (int $cfg.dataParallelSize) }}
+            - name: kv-events-{{ $i }}
+              containerPort: {{ add ($.Values.kvEvents.basePort | int) $i }}
+              protocol: TCP
+            {{- end }}
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: {{ if eq .Values.dp.lbMode "multiport" }}supervisor{{ else }}engine{{ end }}
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 540
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ if eq .Values.dp.lbMode "multiport" }}supervisor{{ else }}engine{{ end }}
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: {{ if eq .Values.dp.lbMode "multiport" }}/readyz{{ else }}/v1/models{{ end }}
+              port: {{ if eq .Values.dp.lbMode "multiport" }}supervisor{{ else }}engine{{ end }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              {{- toYaml $cfg.resources.requests | nindent 14 }}
+              nvidia.com/gpu: {{ $cfg.gpus | quote }}
+              {{- if .Values.infiniband.enabled }}
+              rdma/ib: {{ .Values.infiniband.devices | quote }}
+              {{- end }}
+            limits:
+              {{- toYaml $cfg.resources.limits | nindent 14 }}
+              nvidia.com/gpu: {{ $cfg.gpus | quote }}
+              {{- if .Values.infiniband.enabled }}
+              rdma/ib: {{ .Values.infiniband.devices | quote }}
+              {{- end }}
+          volumeMounts:
+            {{- include "dsv4.cacheVolumeMounts" . | nindent 12 }}
+            {{- if eq (toString .Values.offloading.mode) "tiered" }}
+            - name: nvme-cache
+              mountPath: {{ .Values.offloading.nvmePath }}
+            {{- end }}
+{{- if .Values.nodeExporter.enabled }}
+        - name: node-exporter
+          image: {{ .Values.nodeExporter.image }}
+          args:
+            - --collector.disable-defaults
+            - --collector.infiniband
+            - --collector.netstat
+            - --collector.pressure
+            - --collector.cpu
+          ports:
+            - name: node-metrics
+              containerPort: 9100
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+{{- end }}

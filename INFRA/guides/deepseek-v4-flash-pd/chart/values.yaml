@@ -1,0 +1,211 @@
+## dsv4-flash-modelserver — default values.
+##
+## The defaults encode the target deployment:
+##   DeepSeek-V4-Flash-0731 on H100, P/D disaggregated,
+##   prefill = 8 GPUs (DEP8), decode = 4 GPUs (DEP4), TP=1 on both legs,
+##   CPU KV-cache offloading on, peer-to-peer KV sharing on.
+##
+## Override with `-f values/<layer>.values.yaml` (see ../values/) or --set.
+## Later -f files win, so layer narrow overrides on top of broad ones.
+
+## Guide identity. `guideName` MUST equal the Helm release name of the router
+## chart: the InferencePool selector is built from it and matches the
+## llm-d.ai/guide label stamped on the pods below.
+guideName: deepseek-v4-flash
+
+model:
+  # HuggingFace repo id served by both legs.
+  name: deepseek-ai/DeepSeek-V4-Flash-0731
+  # Value of the llm-d.ai/model label. Must be a valid label value
+  # (no slashes), so it is not derived from `name`.
+  label: DeepSeek-V4-Flash-0731
+  # DeepSeek-V4 ships a custom tokenizer; vLLM needs the explicit mode.
+  tokenizerMode: deepseek_v4
+  trustRemoteCode: true
+  # "auto" lets vLLM take the model's own maximum (1M tokens for this model).
+  # Pin a smaller number to bound KV-cache memory.
+  maxModelLen: "auto"
+  kvCacheDtype: fp8
+  # DeepSeek-V4-Flash's model card serves with --block-size 256.
+  blockSize: 256
+
+image:
+  repository: docker.io/vllm/vllm-openai
+  # v0.27.1 is the first tagged release carrying the full OffloadingConnector
+  # P2P secondary-tier set (vllm#48021 + #49671 + #49823 + #49877 + #50302),
+  # which the p2p tier below depends on.
+  tag: v0.27.1
+  pullPolicy: IfNotPresent
+
+## Routing sidecar (llm-d-router-disagg-sidecar). Runs in front of the decode
+## engine: it receives the request with the EPP's prefill header, drives the
+## NIXL P/D handoff, and — when p2p.enabled — injects the KV-cache pull source
+## into the prefill call.
+sidecar:
+  repository: ghcr.io/llm-d/llm-d-router-disagg-sidecar
+  # v0.9.0's tagged sidecar predates offloading P2P pull support
+  # (llm-d-router#1937); `main` is what the p2p guide itself pins. Resolve to a
+  # digest before you benchmark — this tag floats.
+  tag: main
+  pullPolicy: Always
+  logLevel: 1
+
+## Secret holding HF_TOKEN. Created by ../../scripts/02-namespace-and-secret.sh.
+hfTokenSecret: llm-d-hf-token
+
+moe:
+  enableExpertParallel: true
+  # DeepSeek-V4's MegaMoE path — what the model card and the repo's own
+  # DeepSeek-V4 recipe use. The GLM-5.2 recipe uses plain `deep_gemm`; switch
+  # with values/moe-backend-deep-gemm.values.yaml.
+  backend: deep_gemm_mega_moe
+  # Load only the expert shards this rank serves. Cuts per-rank weight memory,
+  # which is what makes DEP viable at all on 80 GB cards.
+  enableEpWeightFilter: true
+
+## DSpark multi-token prediction head shipped with the checkpoint.
+speculative:
+  enabled: true
+  method: dspark
+  numTokens: 7
+  draftSampleMethod: greedy
+
+## Data-parallel load-balancing mode.
+##   internal  — one API server per pod, vLLM balances across local DP ranks.
+##               One port per pod. Prefill and decode may have different DP
+##               sizes. KV-cache events are NOT usable (only rank 0's socket is
+##               reachable), so routing uses the approximate prefix index.
+##   multiport — one API server per DP rank (--data-parallel-multi-port-
+##               external-lb). The EPP routes per rank and the precise
+##               KV-event index works, but the InferencePool exposes a single
+##               targetPort list, so prefill and decode DP sizes must match.
+## See values/dp-multiport.values.yaml and ../router/precise-routing.values.yaml.
+dp:
+  lbMode: internal
+
+prefill:
+  replicas: 1
+  gpus: 8
+  # DEP8: TP=1, DP=8, EP=8. One GPU per DP rank, experts sharded across all 8.
+  dataParallelSize: 8
+  tensorParallelSize: 1
+  # High-throughput DeepEP kernels: prefill is compute-bound and batches wide.
+  all2allBackend: deepep_high_throughput
+  gpuMemoryUtilization: 0.90
+  # More HTTP front-ends than one so the API server is not the prefill
+  # bottleneck at high QPS. Only meaningful with dp.lbMode=internal.
+  apiServerCount: 4
+  maxNumBatchedTokens: 8192
+  maxNumSeqs: 16
+  enforceEager: false
+  resources:
+    requests:
+      cpu: "64"
+      memory: 1200Gi
+      ephemeral-storage: 1Ti
+    limits:
+      cpu: "128"
+      memory: 1200Gi
+      ephemeral-storage: 1Ti
+  # /dev/shm must exceed offloading.cpuBytes x dataParallelSize: the CPU tier
+  # is an shm mmap and every DP rank allocates its own region.
+  dshmSize: 800Gi
+  nodeSelector: {}
+  tolerations: []
+  # Keep the DP ranks of one replica on one node; DeepEP all-to-all is
+  # intra-node NVLink traffic unless infiniband.enabled.
+  extraEnv: []
+
+decode:
+  replicas: 1
+  gpus: 4
+  # DEP4: TP=1, DP=4, EP=4.
+  dataParallelSize: 4
+  tensorParallelSize: 1
+  # Low-latency DeepEP kernels: decode is latency-bound and batches narrow.
+  all2allBackend: deepep_low_latency
+  gpuMemoryUtilization: 0.90
+  apiServerCount: 2
+  # Decode batches are token-at-a-time; these bound the low-latency all-to-all
+  # dispatch buffers (NVSHMEM_QP_DEPTH is derived from maxNumSeqs).
+  maxNumBatchedTokens: 512
+  maxNumSeqs: 128
+  enforceEager: false
+  # Port the engine listens on behind the sidecar. The sidecar owns 8000.
+  enginePort: 8200
+  resources:
+    requests:
+      cpu: "32"
+      memory: 700Gi
+      ephemeral-storage: 1Ti
+    limits:
+      cpu: "64"
+      memory: 700Gi
+      ephemeral-storage: 1Ti
+  dshmSize: 400Gi
+  nodeSelector: {}
+  tolerations: []
+  extraEnv: []
+
+## KV-cache offloading (vLLM OffloadingConnector, layered under MultiConnector
+## next to NixlConnector so P/D transfer and offloading coexist).
+##   "off"  — NixlConnector only, no CPU tier. Quote it: YAML 1.1 reads a bare
+##            `off` as the boolean false.
+##   cpu    — CPU tier in /dev/shm.
+##   tiered — CPU tier plus an NVMe secondary tier at nvmePath.
+offloading:
+  mode: cpu
+  # Per DP rank, as a string so Helm does not render it in scientific notation.
+  # 88 GiB — at or above the per-rank GPU KV cache, which is the sizing rule.
+  cpuBytes: "94489280512"
+  # false so generated (decode-phase) blocks are offloaded too. Required for
+  # the multi-turn P2P case: prefill pulls decode's generated KV.
+  offloadPromptOnly: false
+  evictionPolicy: lru
+  nvmePath: /mnt/nvme-cache
+  # hostPath backing the NVMe tier when mode=tiered.
+  nvmeHostPath: /mnt/local/kv-cache
+
+## Peer-to-peer KV cache sharing. Adds a P2P secondary tier to the offloading
+## connector so any pod can serve cached blocks to a peer out of its CPU tier,
+## and turns on the sidecar's pull injection.
+## Requires offloading.mode != off.
+p2p:
+  enabled: true
+  port: 7777
+
+## Per-rank KV-cache event publishing. Only usable with dp.lbMode=multiport
+## (see dp.lbMode above) — leave off with internal LB or the router indexes a
+## single rank and silently mis-scores every other one.
+kvEvents:
+  enabled: false
+  # Router-side socketPort must equal basePort. vLLM offsets the configured
+  # port by the global DP rank, so the launcher subtracts the pod's start rank
+  # to land publishers on basePort..basePort+dataParallelSize-1.
+  basePort: 5557
+  # Must equal the router's tokenProcessorConfig.blockSizeTokens.
+  blockSize: 64
+
+## InfiniBand / RDMA. Off by default: a single-node DEP group does all-to-all
+## over NVLink. Turn on for multi-node fabrics (values/infiniband.values.yaml).
+infiniband:
+  enabled: false
+  hcaPrefix: ibp
+  # rdma/ib resource units requested per pod.
+  devices: 8
+
+## Render (tokenizer) Service. Owns no pods: it fronts the prefill pods, which
+## already serve /v1/*/render. The router's token-producer dials it.
+render:
+  enabled: true
+  port: 8000
+
+monitoring:
+  podMonitor: false
+  interval: 15s
+
+## Node-exporter sidecar (InfiniBand / CPU / memory-pressure metrics), as in
+## the GLM-5.2 recipe. Off unless you scrape it.
+nodeExporter:
+  enabled: false
+  image: quay.io/prometheus/node-exporter:v1.9.0

@@ -1,0 +1,14 @@
+## InfiniBand / RDMA for multi-node fabrics.
+##
+## Only needed when a DEP group's ranks cannot all sit on one node, or when you
+## want NIXL P/D transfers and P2P pulls to run over RDMA rather than TCP.
+## Within a single node DeepEP all-to-all already runs over NVLink and this
+## layer is unnecessary.
+##
+## `hcaPrefix` filters which HCAs NCCL and NVSHMEM may use — set it to your
+## fabric's device prefix (`ibp` on CoreWeave, often `mlx5` elsewhere; check
+## `ibv_devinfo` on a node).
+infiniband:
+  enabled: true
+  hcaPrefix: ibp
+  devices: 8

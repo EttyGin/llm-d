@@ -1,0 +1,8 @@
+## Keep CPU offloading, drop peer-to-peer sharing.
+##
+## The control arm for measuring the pull: each pod still offloads its own KV
+## to CPU and reuses it locally, but a cache miss is recomputed instead of
+## pulled from a peer. Pair with a router values file that has no
+## p2p-source-producer (see router/deepseek-v4-flash.values.yaml's comments).
+p2p:
+  enabled: false

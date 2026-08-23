@@ -1,0 +1,22 @@
+{{- if .Values.monitoring.podMonitor }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Release.Name }}-modelserver
+  labels:
+    {{- include "dsv4.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      llm-d.ai/guide: {{ .Values.guideName }}
+      llm-d.ai/inference-serving: "true"
+  podMetricsEndpoints:
+    - port: {{ if eq .Values.dp.lbMode "multiport" }}dp0{{ else }}modelserver{{ end }}
+      path: /metrics
+      interval: {{ .Values.monitoring.interval }}
+{{- if .Values.nodeExporter.enabled }}
+    - port: node-metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.interval }}
+{{- end }}
+{{- end }}

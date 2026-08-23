@@ -1,0 +1,8 @@
+## Use the plain DeepGemm MoE backend instead of DeepSeek-V4's MegaMoE path.
+##
+## `deep_gemm` is what the GLM-5.2 wide-EP recipe runs. `deep_gemm_mega_moe`
+## (the chart default) is what DeepSeek-V4-Flash's own model card and the
+## repo's DeepSeek-V4 recipe use, and is the faster path for this model family.
+## Apply this layer only if MegaMoE fails to build or you are comparing the two.
+moe:
+  backend: deep_gemm

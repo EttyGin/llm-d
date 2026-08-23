@@ -1,0 +1,15 @@
+## CPU + NVMe tiered KV-cache offloading.
+##
+## Adds a filesystem secondary tier below the CPU tier. Blocks evicted from CPU
+## land on local NVMe instead of being dropped, which extends the reusable
+## prefix window well past what RAM alone holds — at the cost of a disk read on
+## the way back in.
+##
+## Requires a writable local NVMe mount on every node that runs these pods, at
+## offloading.nvmeHostPath. There is no eviction daemon in this chart: size the
+## mount for your working set, or run one (see the GLM-5.2 recipe's
+## kv-cache-evictor DaemonSet).
+offloading:
+  mode: tiered
+  nvmePath: /mnt/nvme-cache
+  nvmeHostPath: /mnt/local/kv-cache

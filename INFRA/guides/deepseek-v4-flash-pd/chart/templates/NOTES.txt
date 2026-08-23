@@ -1,0 +1,46 @@
+{{ .Chart.Name }} {{ .Chart.Version }} — release {{ .Release.Name }} in namespace {{ .Release.Namespace }}
+
+  Model     {{ .Values.model.name }}
+  Prefill   {{ .Values.prefill.replicas }} x (DP{{ .Values.prefill.dataParallelSize }}, TP{{ .Values.prefill.tensorParallelSize }}, {{ .Values.prefill.gpus }} GPU) — all2all {{ .Values.prefill.all2allBackend }}
+  Decode    {{ .Values.decode.replicas }} x (DP{{ .Values.decode.dataParallelSize }}, TP{{ .Values.decode.tensorParallelSize }}, {{ .Values.decode.gpus }} GPU) — all2all {{ .Values.decode.all2allBackend }}
+  MoE       {{ .Values.moe.backend }}{{ if .Values.moe.enableExpertParallel }} (expert-parallel){{ end }}
+  Offload   {{ .Values.offloading.mode }}{{ if ne .Values.offloading.mode "off" }} — {{ .Values.offloading.cpuBytes }} bytes per DP rank{{ end }}
+  P2P       {{ if .Values.p2p.enabled }}on, port {{ .Values.p2p.port }}{{ else }}off{{ end }}
+  DP LB     {{ .Values.dp.lbMode }}{{ if eq .Values.dp.lbMode "internal" }} (single port per pod; KV events unusable){{ end }}
+
+Total GPUs requested: {{ add (mul (int .Values.prefill.replicas) (int .Values.prefill.gpus)) (mul (int .Values.decode.replicas) (int .Values.decode.gpus)) }}
+
+Next:
+
+  1. Install the router with the matching release name ({{ .Values.guideName }}):
+
+       helm upgrade --install {{ .Values.guideName }} \
+         oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v0.10.0 \
+         -f INFRA/values/base.values.yaml \
+         -f INFRA/guides/deepseek-v4-flash-pd/router/deepseek-v4-flash.values.yaml \
+         -n {{ .Release.Namespace }}
+
+  2. Watch the engines load (this takes a while — 304B of weights):
+
+       kubectl get pods -n {{ .Release.Namespace }} -l llm-d.ai/guide={{ .Values.guideName }} -w
+
+  3. Send a request through the router:
+
+       IP=$(kubectl get svc {{ .Values.guideName }}-epp -n {{ .Release.Namespace }} -o jsonpath='{.spec.clusterIP}')
+       curl -X POST http://${IP}/v1/completions -H 'Content-Type: application/json' \
+         -d '{"model":"{{ .Values.model.name }}","prompt":"How are you today?"}'
+{{- if and (ne .Values.offloading.mode "off") .Values.p2p.enabled }}
+
+P2P pulls are only possible between pods that share PYTHONHASHSEED (set to 0
+here) and run the same engine build. Confirm pulls are happening with:
+
+  kubectl logs -n {{ .Release.Namespace }} -l llm-d.ai/role=prefill -c vllm | grep -i remote_kv_source
+{{- end }}
+{{- if eq .Values.dp.lbMode "internal" }}
+
+NOTE: dp.lbMode=internal means each pod exposes ONE port and vLLM balances
+across its local DP ranks. Per-rank KV-cache events are therefore not visible
+to the router, so use the approximate prefix index (the default router values).
+Switch to values/dp-multiport.values.yaml + router/precise-routing.values.yaml
+for the precise index — it requires prefill and decode DP sizes to match.
+{{- end }}

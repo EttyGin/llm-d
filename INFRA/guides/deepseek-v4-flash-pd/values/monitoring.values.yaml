@@ -1,0 +1,10 @@
+## Prometheus scraping for the model servers.
+## Requires the Prometheus Operator CRDs (PodMonitor) in the cluster.
+##
+## Pair with -f INFRA/values/monitoring.values.yaml on the router install so
+## the EPP's own metrics are scraped too.
+monitoring:
+  podMonitor: true
+  interval: 15s
+nodeExporter:
+  enabled: true
