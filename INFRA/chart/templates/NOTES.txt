@@ -1,0 +1,60 @@
+{{- $g := dig "llmd" dict (.Values.global | default dict) -}}
+{{- $router := index .Values "llm-d-router" | default dict -}}
+{{- $ms := index .Values "llm-d-modelserver" | default dict -}}
+{{- $gwMode := dig "llmd" "httpRoute" "create" false $router -}}
+{{- $renderMode := dig "render" "mode" "" $ms -}}
+{{- if not $renderMode }}{{- $renderMode = ternary "standalone" "none" (dig "render" "enabled" false $ms) -}}{{- end -}}
+llm-d {{ .Chart.AppVersion }} is deploying — Router (EPP) + model servers, wired from one identity.
+
+  Model      {{ $g.model }}
+  Guide      {{ $g.guide }}          (InferencePool selector: llm-d.ai/guide)
+  Mode       {{ if $gwMode }}gateway — via Gateway "{{ $g.gateway }}" (must already exist){{ else }}standalone — Envoy sidecar in the EPP pod{{ end }}
+  Router     {{ .Release.Name }}-epp
+  vLLM       {{ $g.vllmVersion }}
+  Render     {{ $renderMode }}{{ if eq $renderMode "service" }} — Service fronting the model servers, no pods of its own{{ else if eq $renderMode "standalone" }} — dedicated `vllm launch render` pool{{ end }}
+
+Watch it come up:
+
+  kubectl -n {{ .Release.Namespace }} get deploy,po,svc,inferencepool{{ if $gwMode }},httproute{{ end }}
+
+Send a request:
+{{ if $gwMode }}
+  IP=$(kubectl -n {{ .Release.Namespace }} get gateway {{ $g.gateway }} -o jsonpath='{.status.addresses[0].value}')
+{{- else }}
+  IP=$(kubectl -n {{ .Release.Namespace }} get svc {{ .Release.Name }}-epp -o jsonpath='{.spec.clusterIP}')
+{{- end }}
+  kubectl -n {{ .Release.Namespace }} run curl-debug --rm -it --image=cfmanteiga/alpine-bash-curl-jq -- \
+    curl -sS -X POST http://$IP/v1/completions -H 'Content-Type: application/json' \
+      -d '{"model": "{{ $g.model }}", "prompt": "How are you today?"}' | jq
+
+Prerequisites:
+  - Gateway API + GAIE CRDs (v1.5.1 / v1.5.0 for llm-d v0.9.0).
+{{- if $gwMode }}
+  - A Gateway named "{{ $g.gateway }}" and its provider's control plane.
+{{- end }}
+  - Secret "{{ dig "llmd" "hfTokenSecret" "name" "llm-d-hf-token" (.Values.global | default dict) }}" with key HF_TOKEN (unless the model is public and cached).
+{{- if or (dig "llmd" "router" "monitoring" "prometheus" "enabled" false $router) (dig "monitoring" "podMonitor" "enabled" false $ms) }}
+  - The Prometheus Operator (ServiceMonitor / PodMonitor CRDs) — monitoring is on.
+{{- end }}
+{{- if dig "llmd" "router" "rbac" "clusterRole" "create" true $router }}
+{{- if dig "llmd" "router" "monitoring" "prometheus" "enabled" false $router }}
+  - cluster-admin: the EPP /metrics-auth ClusterRole is created. No admin? Set
+    llm-d-router.llmd.router.rbac.clusterRole.create=false and pre-apply
+    examples/rbac/epp-rbac.yaml.
+{{- end }}
+{{- end }}
+
+{{- if dig "prefill" "enabled" false $ms }}
+
+P/D DISAGGREGATION IS ON. Two roles — {{ .Release.Name }}-prefill and
+{{ .Release.Name }}-decode — in ONE InferencePool, split by llm-d.ai/role. The
+decode pod carries the routing-proxy sidecar with vLLM shifted to :8200.
+Production KV transfer wants an RDMA (IB/RoCE) interconnect.
+{{- end }}
+
+To retarget this deployment, change `global.llmd` — model, guide and gateway fan
+out from there to both subcharts. A chart that wraps this one can set the same
+keys in its own values.yaml and inherit everything else unchanged.
+
+vLLM arguments are yours: author them in llm-d-modelserver.decode.spec (rendered
+verbatim) or append with decode.extraArgs.

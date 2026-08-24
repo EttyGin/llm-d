@@ -1,0 +1,326 @@
+# =============================================================================
+# llm-d umbrella chart — values
+#
+#   helm install my-llm-d . -n <namespace> -f my-values.yaml
+#
+#   ┌───────────────────────────────────────────────────────────────────────┐
+#   │  Edit `global.llmd` ONCE. It fans out to both subcharts AND to any    │
+#   │  parent chart that wraps this one — Helm propagates `global` through  │
+#   │  every level of the dependency tree.                                  │
+#   └───────────────────────────────────────────────────────────────────────┘
+#
+# WHY `global` AND NOT YAML ANCHORS
+#   Anchors (&name / *name) resolve inside ONE file. The moment someone layers a
+#   second `-f`, or wraps this chart in their own, the anchor is gone and the
+#   identity has to be restated. `global.llmd.*` survives both:
+#
+#     helm install x . --set global.llmd.model=meta-llama/Llama-3.1-8B-Instruct
+#
+#   propagates to the model servers, the InferencePool selector, the HTTPRoute's
+#   gateway, and the tokenizer — with no other edit. A wrapping chart just sets
+#   `global.llmd.*` in its own values.yaml and inherits everything else.
+#
+# PRECEDENCE, everywhere: an explicit subchart value wins > global.llmd.* >
+# the chart's built-in default. Nothing below silently overrides a value you set.
+#
+# The GATEWAY object is not managed here — deploy it separately (see
+# INFRA/scripts/01-install-gateway.sh) and name it in global.llmd.gateway.
+# =============================================================================
+
+global:
+  llmd:
+    # Full HuggingFace model name. The ONE place the model string is written
+    # (except inside vLLM args, which are yours — see the note under
+    # llm-d-modelserver.decode.spec).
+    model: Qwen/Qwen3-32B
+    # Short label form (no "/") for the llm-d.ai/model label.
+    modelLabel: Qwen3-32B
+    # Guide / InferencePool selector value. This is what ties the model servers
+    # to the router: the servers stamp `llm-d.ai/guide: <this>` on their pods and
+    # the router selects on it.
+    guide: optimized-baseline
+    # Name of a PRE-EXISTING Gateway. The router's HTTPRoute binds to it in
+    # gateway mode. Nothing here creates it.
+    gateway: llm-d-inference-gateway
+    # Secret holding the HuggingFace token.
+    hfTokenSecret:
+      name: llm-d-hf-token
+      key: HF_TOKEN
+    # vLLM release shared by the model servers, the render pool and the EPP
+    # tokenizer sidecar. Only the TAG is shared — repositories differ
+    # (GPU: vllm-openai, CPU render/tokenizer: vllm-openai-cpu).
+    vllmVersion: v0.26.0
+    accelerator:
+      variant: gpu
+      vendor: nvidia
+
+# =============================================================================
+# DEPLOYMENT MODE — this umbrella is GATEWAY MODE ONLY.
+#
+# It vendors `llm-d-router-gateway`: a Kubernetes Gateway fronts the EPP, the
+# chart creates the HTTPRoute, and the Gateway provider's own proxy is the data
+# plane. Deploy the Gateway separately and name it in global.llmd.gateway.
+#
+# STANDALONE mode (Envoy sidecar in the EPP pod, no Gateway) needs the OTHER
+# upstream chart — `llm-d-router-standalone`. Setting router.proxy.enabled=true
+# here does NOT produce a working standalone deployment: the gateway chart has
+# no proxy image defaults and never emits the Envoy configuration ConfigMap, so
+# the sidecar renders unnamed and imageless. Verified, not assumed.
+# For standalone, install that chart directly — INFRA/scripts/03-install-router.sh
+# with ROUTER_MODE=standalone does exactly that.
+# =============================================================================
+
+# =============================================================================
+# Router / EPP  (subchart: llm-d-router — passthrough to the vendored OCI chart)
+#
+# Everything under `llmd:` mirrors the upstream llm-d-router-gateway values
+# 1:1. charts/llm-d-router/values.yaml is the COMPLETE reference; this file
+# surfaces the commonly-tuned keys and the identity wiring.
+# =============================================================================
+llm-d-router:
+  llmd:
+    provider:
+      # none | agentgateway | istio | gke
+      name: istio
+
+    httpRoute:
+      create: true
+      # inferenceGatewayName left unset -> global.llmd.gateway
+      requestTimeout: "0s"
+
+    router:
+      modelServers:
+        type: vllm
+        protocol: http
+        targetPorts:
+          - number: 8000
+        # matchLabels left unset -> {llm-d.ai/guide, llm-d.ai/model} from the
+        # identity. Set it to select on something narrower.
+
+      inferencePool:
+        create: true
+        failureMode: "FailOpen"
+
+      epp:
+        replicas: 1
+        flags:
+          v: 2
+        resources:
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            memory: 16Gi
+
+        # ---- Routing config. DEFAULT: the simplest useful policy — send each
+        # request to the endpoint with the shortest queue and the lowest KV-cache
+        # utilisation. No tokenizer, no kv-events, nothing to calibrate.
+        # (metrics-data-source + core-metrics-extractor are injected by default.)
+        #
+        # Smarter policies are one overlay away:
+        #   examples/values-optimized-baseline.yaml           approximate prefix affinity
+        #   examples/values-precise-prefix-cache-routing.yaml exact KV-event index
+        #   examples/values-pd-disaggregation.yaml            P/D split
+        pluginsConfigFile: "load-aware-plugins.yaml"
+        pluginsCustomConfig:
+          load-aware-plugins.yaml: |
+            apiVersion: llm-d.ai/v1alpha1
+            kind: EndpointPickerConfig
+            plugins:
+              - type: queue-scorer
+              - type: kv-cache-utilization-scorer
+            schedulingProfiles:
+              - name: default
+                plugins:
+                  - pluginRef: queue-scorer
+                    weight: 1
+                  - pluginRef: kv-cache-utilization-scorer
+                    weight: 1
+
+      # Tokenizer SIDECAR — OFF, matching upstream v0.10.0 and the v0.9.0 guides.
+      # See llm-d-modelserver.render.mode below for the recommended topology.
+      tokenizer:
+        enabled: false
+
+      proxy:
+        enabled: false
+
+      monitoring:
+        interval: "10s"
+        prometheus:
+          # Needs the Prometheus Operator (ServiceMonitor CRD) AND, unless you
+          # set rbac.clusterRole.create:false, cluster-admin to create the
+          # /metrics-auth ClusterRole.
+          enabled: false
+          auth:
+            enabled: false
+
+      # Vendored-patch knob: bring your own EPP ClusterRole.
+      #   create:false + existingName:X  -> bind to an existing ClusterRole
+      #   create:false + existingName:"" -> create nothing (pre-provision both)
+      rbac:
+        clusterRole:
+          create: true
+          existingName: ""
+
+      tracing:
+        enabled: false
+
+      latencyPredictor:
+        enabled: false
+
+# =============================================================================
+# Model servers  (subchart: llm-d-modelserver)
+#
+# `decode.spec` / `prefill.spec` are rendered VERBATIM — they are the upstream
+# kustomize patch `spec:`, so anything the kustomize overlays can express, this
+# can. The chart injects only what the kustomize base injects: metadata, the
+# guide/role labels, the selector, the pod-template labels and the SA.
+#
+# vLLM ARGUMENTS ARE DELIBERATELY YOURS. The chart does not model tensor
+# parallelism, kv-transfer configs, all2all backends or MoE flags — those change
+# per model and per release, and a chart that guessed them would be wrong more
+# often than right. Author them in `decode.spec` (or append with `extraArgs`)
+# exactly as you would in a kustomize patch.
+# =============================================================================
+llm-d-modelserver:
+  # model.name / model.label / guideLabel / accelerator / hfTokenSecret all
+  # resolve from global.llmd.* — do not restate them here.
+
+  serviceAccount:
+    create: true
+    name: ""
+
+  hfTokenSecret:
+    enabled: true
+
+  decode:
+    enabled: true
+    containerName: modelserver
+
+    # Additive knobs — appended, never replacing what is in spec below.
+    extraArgs: []
+    extraEnv: []
+    extraVolumeMounts: []
+    extraVolumes: []
+    podAnnotations: {}
+    deploymentAnnotations: {}
+    containerSecurityContext: {}
+    podSecurityContext: {}
+    imagePullSecrets: []
+
+    # Only the repository is set: the tag falls back to global.llmd.vllmVersion,
+    # so a release bump is one edit. Switch the repository for other targets
+    # (AMD: ghcr.io/llm-d/llm-d-rocm, Intel: .../llm-d-xpu, CPU: .../llm-d-cpu).
+    image:
+      repository: vllm/vllm-openai
+
+    # deployment | leaderWorkerSet (wide-EP multi-node DP; needs the LWS controller)
+    workload: deployment
+
+    # ---- The verbatim patch `spec:` — a minimal, generic model server. ----
+    # Replace or extend it for your model. The model string appears here because
+    # it is a vLLM ARG, which this chart deliberately does not own; keep it equal
+    # to global.llmd.model (validations.yaml checks this and fails the render).
+    spec:
+      replicas: 8
+      template:
+        spec:
+          containers:
+            - name: modelserver
+              imagePullPolicy: IfNotPresent
+              command: ["vllm", "serve"]
+              args:
+                - Qwen/Qwen3-32B
+                - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+                - --tensor-parallel-size=2
+              ports:
+                - name: modelserver
+                  containerPort: 8000
+                  protocol: TCP
+              env:
+                - name: DO_NOT_TRACK
+                  value: "1"
+                - name: USER
+                  value: llm-d
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: llm-d-hf-token
+                      key: HF_TOKEN
+              resources:
+                limits:
+                  cpu: "16"
+                  memory: 128Gi
+                  nvidia.com/gpu: 2
+                requests:
+                  cpu: "8"
+                  memory: 96Gi
+                  nvidia.com/gpu: 2
+              startupProbe:
+                httpGet:
+                  path: /v1/models
+                  port: modelserver
+                initialDelaySeconds: 15
+                periodSeconds: 30
+                timeoutSeconds: 5
+                failureThreshold: 120
+              livenessProbe:
+                httpGet:
+                  path: /health
+                  port: modelserver
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 3
+              readinessProbe:
+                httpGet:
+                  path: /v1/models
+                  port: modelserver
+                periodSeconds: 5
+                timeoutSeconds: 2
+                failureThreshold: 3
+              volumeMounts:
+                - name: shm
+                  mountPath: /dev/shm
+                - name: cache
+                  mountPath: /.cache
+                - name: triton-cache
+                  mountPath: /.triton
+                - name: vllm-config
+                  mountPath: /.config
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 20Gi
+            - name: cache
+              emptyDir: {}
+            - name: triton-cache
+              emptyDir: {}
+            - name: vllm-config
+              emptyDir: {}
+
+  # P/D disaggregation — off. Turning it on requires the decode pod to gain the
+  # routing sidecar and shift vLLM to :8200; validations.yaml enforces both.
+  prefill:
+    enabled: false
+
+  # ---- Render (tokenizer) endpoint ----
+  # none | service | standalone. Deploy one ONLY when the EPP plugin chain has a
+  # `token-producer` — the default load-aware policy above does not.
+  #   service     Service with no pods, fronting the model servers. Costs
+  #               nothing to run and scales with the fleet. Use this for vLLM.
+  #   standalone  dedicated GPU-less `vllm launch render` pool. REQUIRED for
+  #               SGLang (no /v1/*/render endpoints).
+  render:
+    mode: none
+
+  monitoring:
+    podMonitor:
+      enabled: false
+      interval: 30s
+      path: /metrics
+
+  autoscaling:
+    keda:
+      enabled: false

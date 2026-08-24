@@ -1,0 +1,37 @@
+# =============================================================================
+# Reproduces guides/optimized-baseline routing on top of the umbrella chart.
+#
+#   helm install my-llm-d . -n <ns> -f examples/values-optimized-baseline.yaml
+#
+# Upgrades the base's generic queue+KV routing to prefix-cache-AFFINITY routing:
+# narrows candidates to endpoints with high estimated prompt-prefix cache reuse
+# (approximate — no kv-events needed), with a load-aware token scorer. Needs the
+# EPP tokenizer sidecar. The base model server already matches this guide's
+# sizing (Qwen3-32B, TP=2, 8 replicas).
+# =============================================================================
+llm-d-router:
+  llmd:
+    router:
+      # Approx prefix-cache producer tokenizes requests → sidecar required.
+      tokenizer:
+        enabled: true
+      epp:
+        pluginsConfigFile: "optimized-baseline-plugins.yaml"
+        pluginsCustomConfig:
+          optimized-baseline-plugins.yaml: |
+            apiVersion: llm-d.ai/v1alpha1
+            kind: EndpointPickerConfig
+            # prefix-cache-affinity-filter's peakPrefillThroughput default (15928)
+            # is calibrated for Qwen3-32B on H100 80 GB, TP=2. For other
+            # hardware/models, measure your own with
+            # guides/recipes/router/calibration and set it on the filter.
+            plugins:
+            - type: approx-prefix-cache-producer
+            - type: inflight-load-producer
+            - type: prefix-cache-affinity-filter
+            - type: token-load-scorer
+            schedulingProfiles:
+            - name: default
+              plugins:
+              - pluginRef: prefix-cache-affinity-filter
+              - pluginRef: token-load-scorer

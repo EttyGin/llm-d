@@ -1,0 +1,126 @@
+# =============================================================================
+# Reproduces guides/precise-prefix-cache-routing on the umbrella chart.
+#
+#   helm install my-llm-d . -n <ns> -f my-values.yaml \
+#                           -f examples/values-precise-prefix-cache-routing.yaml
+#
+# Exact prefix-cache routing: every vLLM pod publishes KV-cache events over ZMQ,
+# the EPP subscribes per pod, indexes them by block hash, filters candidates to
+# the pods where the request's prefix is already resident, and picks the least
+# token-loaded pod among them.
+#
+# Three things must agree, and none of them can be single-sourced (the plugin
+# config is an opaque string and vLLM args are hand-authored). validations.yaml
+# checks all three and fails the render:
+#   - the model in the vLLM args == global.llmd.model == token-producer modelName
+#   - --block-size == tokenProcessorConfig.blockSizeTokens
+#   - a token-producer exists <=> exactly one render topology is deployed
+# =============================================================================
+
+global:
+  llmd:
+    # Override in YOUR values file; repeated here only so this example renders
+    # standalone. The anchors below are file-local — the GLOBAL is what
+    # propagates to the subcharts and to any chart wrapping this one.
+    model: &model Qwen/Qwen3-32B
+    modelLabel: Qwen3-32B
+    guide: precise-prefix-cache-routing
+
+llm-d-modelserver:
+  decode:
+    # Additive — no need to restate decode.spec.
+    extraArgs:
+      # MUST equal tokenProcessorConfig.blockSizeTokens below.
+      - --block-size=64
+      # vLLM v0.26+ also binds a ZMQ ROUTER on the replay port and keeps the
+      # last 10k event batches, so an EPP that restarts rebuilds its index from
+      # the buffer instead of waiting for live traffic to refill it.
+      - --kv-events-config
+      - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","replay_endpoint":"$(KV_EVENTS_REPLAY_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@$(MODEL_NAME)"}'
+    extraEnv:
+      - name: MODEL_NAME
+        value: *model
+      - name: POD_IP
+        valueFrom:
+          fieldRef:
+            fieldPath: status.podIP
+      - name: POD_PORT
+        value: "8000"
+      # Per-pod sockets: every EPP replica dials each pod independently, so the
+      # index converges the same way on all of them.
+      - name: KV_EVENTS_ENDPOINT
+        value: "tcp://*:5556"
+      - name: KV_EVENTS_REPLAY_ENDPOINT
+        value: "tcp://*:5559"
+
+  # Tokenization from a Service fronting the model servers — `vllm serve`
+  # already exposes the render endpoints, so this costs no extra pods and its
+  # capacity scales with the fleet. (SGLang has no render endpoints: use
+  # `standalone` there.)
+  render:
+    mode: service
+
+llm-d-router:
+  llmd:
+    router:
+      epp:
+        # The precise index is HA-safe (each replica converges via pod
+        # discovery), but the token-load accounting below is per-process — keep
+        # this at 1 while token-load-scorer is in the profile.
+        replicas: 1
+        flags:
+          ha-enable-leader-election: false
+        pluginsConfigFile: "precise-prefix-cache-routing-plugins.yaml"
+        pluginsCustomConfig:
+          precise-prefix-cache-routing-plugins.yaml: |
+            apiVersion: llm-d.ai/v1alpha1
+            kind: EndpointPickerConfig
+            plugins:
+              - type: token-producer
+                parameters:
+                  # == global.llmd.model (validations.yaml enforces it).
+                  modelName: Qwen/Qwen3-32B
+                  vllm:
+                    # The render Service above: "<guide>-render".
+                    url: "http://precise-prefix-cache-routing-render:8000"
+              - type: endpoint-notification-source
+              - type: precise-prefix-cache-producer
+                parameters:
+                  tokenProcessorConfig:
+                    # == the decode --block-size above.
+                    blockSizeTokens: 64
+                  speculativeIndexing: true
+                  indexerConfig:
+                    kvBlockIndexConfig:
+                      enableMetrics: true
+                  kvEventsConfig:
+                    topicFilter: "kv@"
+                    concurrency: 8
+                    discoverPods: true
+                    podDiscoveryConfig:
+                      socketPort: 5556
+                      replaySocketPort: 5559
+              - type: inflight-load-producer
+                parameters:
+                  prefixMatchInfoProducerName: precise-prefix-cache-producer
+              - type: prefix-cache-affinity-filter
+                parameters:
+                  prefixMatchInfoProducerName: precise-prefix-cache-producer
+                  inFlightLoadProducerName: inflight-load-producer
+                  # Calibrated for Qwen3-32B on H100 80GB, TP=2, chunk 8192.
+                  # Re-measure for other hardware/models with
+                  # guides/recipes/router/calibration/calibrate.sh — too high and
+                  # saturated pods are never bypassed, too low and affinity never
+                  # engages.
+                  peakPrefillThroughput: 15926
+              - type: token-load-scorer
+            dataLayer:
+              sources:
+                - pluginRef: endpoint-notification-source
+                  extractors:
+                    - pluginRef: precise-prefix-cache-producer
+            schedulingProfiles:
+              - name: default
+                plugins:
+                  - pluginRef: prefix-cache-affinity-filter
+                  - pluginRef: token-load-scorer

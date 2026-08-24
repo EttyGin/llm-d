@@ -1,0 +1,20 @@
+# Use an EXISTING EPP ClusterRole (you have no cluster-admin to create one).
+#
+#   1. An admin pre-creates the ClusterRole (just the ClusterRole — the chart
+#      makes the binding). Render it from examples/rbac/epp-rbac.yaml:
+#        sed 's/\brelease\b/ppc/g; s/\bnamespace\b/llm-d/g' \
+#          examples/rbac/epp-rbac.yaml | kubectl apply -f -
+#   2. Install pointing at it — that is the ONLY thing you set:
+#        helm install ppc . -n llm-d -f examples/values-byo-clusterrole.yaml
+#
+# The chart does the rest: it does NOT create the ClusterRole, and it binds the
+# EPP ServiceAccount to your existing one. The namespaced Roles/RoleBindings + SA
+# are created in-namespace as usual.
+
+llm-d-router:
+  llmd:
+    router:
+      rbac:
+        clusterRole:
+          create: false
+          existingName: ppc-llm-d-epp   # <release>-<namespace>-epp (or your own name)

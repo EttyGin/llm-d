@@ -1,0 +1,143 @@
+{{- /*
+Fail-fast validation for the umbrella chart. Emits no resources — the guards run
+at render time so mistakes surface in `helm template`/`install`, not at 3am in a
+CrashLoopBackOff. Keep this file free of any real Kubernetes output.
+
+Everything checked here is a value that MUST agree with a value somewhere else
+but cannot be single-sourced, because the EPP plugin config is an opaque YAML
+string and vLLM args are deliberately hand-authored.
+*/ -}}
+{{- $g := dig "llmd" dict (.Values.global | default dict) -}}
+{{- $router := index .Values "llm-d-router" | default dict -}}
+{{- $ms := index .Values "llm-d-modelserver" | default dict -}}
+
+{{- /* ---------- identity ---------- */ -}}
+{{- if not $g.model }}
+{{- fail "global.llmd.model is required (the full HuggingFace model name, e.g. Qwen/Qwen3-32B)." }}
+{{- end }}
+{{- if not $g.guide }}
+{{- fail "global.llmd.guide is required — it is the InferencePool selector that ties the model servers to the router." }}
+{{- end }}
+{{- if and (dig "llmd" "httpRoute" "create" false $router) (not $g.gateway) (not (dig "llmd" "httpRoute" "inferenceGatewayName" "" $router)) }}
+{{- fail "gateway mode (httpRoute.create=true) needs a Gateway name: set global.llmd.gateway (or llm-d-router.llmd.httpRoute.inferenceGatewayName)." }}
+{{- end }}
+{{- if and $g.modelLabel (contains "/" $g.modelLabel) }}
+{{- fail (printf "global.llmd.modelLabel=%q contains a '/', which is illegal in a Kubernetes label value. Use the short form (e.g. Qwen3-32B)." $g.modelLabel) }}
+{{- end }}
+
+{{- /* ---------- KEDA ---------- */ -}}
+{{- $keda := dig "autoscaling" "keda" dict $ms -}}
+{{- if and $keda.enabled (not $keda.eppServiceName) }}
+{{- fail "llm-d-modelserver.autoscaling.keda.eppServiceName is required when autoscaling is enabled: set it to \"<release>-epp\"." }}
+{{- end }}
+
+{{- /* ---------- P/D mode mutates the decode pod ---------- */ -}}
+{{- if dig "prefill" "enabled" false $ms }}
+{{- $decodeSpec := dig "decode" "spec" "template" "spec" dict $ms -}}
+{{- $hasSidecar := false -}}
+{{- range $ic := ($decodeSpec.initContainers | default list) }}
+  {{- if or (eq ($ic.restartPolicy | default "") "Always") (contains "proxy" ($ic.name | default "")) (contains "sidecar" ($ic.name | default "")) }}{{- $hasSidecar = true }}{{- end }}
+{{- end }}
+{{- $cname := dig "decode" "containerName" "modelserver" $ms -}}
+{{- $args := list -}}
+{{- range $c := ($decodeSpec.containers | default list) }}
+  {{- if eq ($c.name | default "") $cname }}{{- $args = concat $args ($c.args | default list) }}{{- end }}
+{{- end }}
+{{- $args = concat $args (dig "decode" "extraArgs" list $ms) -}}
+{{- $hasPortShift := false -}}
+{{- range $a := $args }}{{- if contains "--port" (toString $a) }}{{- $hasPortShift = true }}{{- end }}{{- end }}
+{{- if not $hasSidecar }}
+{{- fail "llm-d-modelserver.prefill.enabled is true (P/D mode) but decode.spec has NO routing-proxy sidecar. Add it as a native initContainer (restartPolicy: Always) — see examples/values-pd-disaggregation.yaml." }}
+{{- end }}
+{{- if not $hasPortShift }}
+{{- fail "llm-d-modelserver.prefill.enabled is true (P/D mode) but decode's vLLM has no port shift. The engine must move to --port=8200 (the sidecar owns 8000). Add it to decode.spec args or decode.extraArgs." }}
+{{- end }}
+{{- end }}
+
+{{- /* ---------- collect the EPP plugin config once ---------- */ -}}
+{{- $pcc := dig "llmd" "router" "epp" "pluginsCustomConfig" dict $router -}}
+{{- $pluginText := "" -}}
+{{- range $file, $content := $pcc }}{{- $pluginText = printf "%s\n%s" $pluginText (toString $content) -}}{{- end }}
+
+{{- /* ---------- block size ----------
+  Precise prefix-cache routing indexes KV blocks, so the EPP's
+  tokenProcessorConfig block size MUST equal vLLM's --block-size. Upstream spells
+  the key BOTH ways depending on the guide (`blockSize` and `blockSizeTokens`),
+  so match either — an earlier version of this guard only matched `blockSize:`
+  and went silently dead against a `blockSizeTokens:` config.
+*/ -}}
+{{- $pluginBS := "" -}}
+{{- range $m := regexFindAll "blockSize(Tokens)?:[ ]*[0-9]+" $pluginText -1 }}
+  {{- $pluginBS = regexFind "[0-9]+" $m -}}
+{{- end }}
+{{- if $pluginBS }}
+{{- $bcname := dig "decode" "containerName" "modelserver" $ms -}}
+{{- $bspec := dig "decode" "spec" "template" "spec" dict $ms -}}
+{{- $bargs := list -}}
+{{- range $c := ($bspec.containers | default list) }}
+  {{- if eq ($c.name | default "") $bcname }}{{- $bargs = concat $bargs ($c.args | default list) }}{{- end }}
+{{- end }}
+{{- $bargs = concat $bargs (dig "decode" "extraArgs" list $ms) -}}
+{{- $argStr := "" -}}
+{{- range $a := $bargs }}{{- $argStr = printf "%s %s" $argStr (toString $a) -}}{{- end }}
+{{- $argBS := "" -}}
+{{- range $mm := regexFindAll "--block-size[= ][0-9]+" $argStr -1 }}{{- $argBS = regexFind "[0-9]+" $mm -}}{{- end }}
+{{- if not $argBS }}
+{{- fail (printf "block-size: the EPP plugin config sets block size %s but the decode model server has NO --block-size arg. Add --block-size=%s to llm-d-modelserver.decode.spec args (or decode.extraArgs), or the KV-block index misaligns with vLLM's blocks and never matches." $pluginBS $pluginBS) }}
+{{- end }}
+{{- if ne $argBS $pluginBS }}
+{{- fail (printf "block-size MISMATCH: EPP plugin config=%s, decode --block-size=%s. They MUST be equal." $pluginBS $argBS) }}
+{{- end }}
+{{- end }}
+
+{{- /* ---------- model name ----------
+  A token-producer's `modelName` tokenizes FOR that model; the render call lands
+  on the servers themselves, so a mismatch is rejected at request time. Check it
+  against the identity AND against the model the vLLM args actually serve.
+*/ -}}
+{{- range $m := regexFindAll "modelName:[ ]*[^ \n]+" $pluginText -1 }}
+  {{- $pm := $m | trimPrefix "modelName:" | trim | trimAll "\"'" -}}
+  {{- if and $pm $g.model (ne $pm $g.model) }}
+  {{- fail (printf "modelName MISMATCH: the EPP plugin config has modelName=%s but global.llmd.model=%s. The token-producer must tokenize for the deployed model." $pm $g.model) }}
+  {{- end }}
+{{- end }}
+
+{{- /* The model in the vLLM args is hand-authored (args are yours), so it can
+  drift from the identity. Catch it here rather than at inference time, when the
+  symptom is a 404 on an unknown model. */ -}}
+{{- if $g.model }}
+{{- $dcname := dig "decode" "containerName" "modelserver" $ms -}}
+{{- $dspec := dig "decode" "spec" "template" "spec" dict $ms -}}
+{{- $dargs := list -}}
+{{- range $c := ($dspec.containers | default list) }}
+  {{- if eq ($c.name | default "") $dcname }}{{- $dargs = concat $dargs ($c.args | default list) }}{{- end }}
+{{- end }}
+{{- $dargs = concat $dargs (dig "decode" "extraArgs" list $ms) -}}
+{{- if $dargs }}
+{{- /* Substring, not equality: a script-style launch (command: [bash, -c])
+  carries the model inside one big arg. */ -}}
+{{- $found := false -}}
+{{- range $a := $dargs }}{{- if contains $g.model (toString $a) }}{{- $found = true }}{{- end }}{{- end }}
+{{- if not $found }}
+{{- fail (printf "model MISMATCH: global.llmd.model=%s does not appear in the decode vLLM args. vLLM args are authored by you — pass %s to `vllm serve` in llm-d-modelserver.decode.spec, or change the identity." $g.model $g.model) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- /* ---------- tokenizer topology ----------
+  A `token-producer` needs SOMETHING to tokenize against: the render Service, the
+  standalone render pool, or the EPP sidecar. Exactly one, and at least one.
+*/ -}}
+{{- $needsTokenizer := contains "token-producer" $pluginText -}}
+{{- $renderMode := dig "render" "mode" "" $ms -}}
+{{- if not $renderMode }}{{- $renderMode = ternary "standalone" "none" (dig "render" "enabled" false $ms) -}}{{- end }}
+{{- $sidecar := dig "llmd" "router" "tokenizer" "enabled" false $router -}}
+{{- if and $needsTokenizer (eq $renderMode "none") (not $sidecar) }}
+{{- fail "the EPP plugin config uses `token-producer` but nothing serves /v1/*/render: set llm-d-modelserver.render.mode to `service` (recommended for vLLM) or `standalone` (required for SGLang), or enable the EPP sidecar with llm-d-router.llmd.router.tokenizer.enabled=true." }}
+{{- end }}
+{{- if and (ne $renderMode "none") $sidecar }}
+{{- fail (printf "two tokenizers configured: render.mode=%s AND the EPP tokenizer sidecar. Pick one — the sidecar is per-EPP-pod loopback, the render Service is shared. llm-d v0.9.0 prefers the Service." $renderMode) }}
+{{- end }}
+{{- if and (not $needsTokenizer) (ne $renderMode "none") }}
+{{- fail (printf "llm-d-modelserver.render.mode=%s but the EPP plugin config has no `token-producer` — nothing would ever call it. Set render.mode=none, or add the plugin." $renderMode) }}
+{{- end }}

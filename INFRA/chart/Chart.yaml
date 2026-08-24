@@ -1,0 +1,25 @@
+apiVersion: v2
+name: llm-d
+description: >-
+  Umbrella (wrapper) chart for llm-d v0.9.0: Router (EPP) + model servers,
+  wired together from ONE identity block in `global.llmd`. Set the model,
+  gateway and guide once and they fan out to both subcharts — and, because Helm
+  propagates `global` down the whole dependency tree, to any chart that wraps
+  this one for a specific deployment. The Gateway is NOT managed here: deploy it
+  separately and name it in global.llmd.gateway.
+type: application
+version: 0.9.0
+appVersion: v0.9.0
+
+dependencies:
+  # llm-d Router (EPP) in Gateway mode. Thin passthrough over the official
+  # OCI llm-d-router-gateway chart (vendored under its own charts/). Untouched.
+  - name: llm-d-router
+    version: 0.9.0
+    repository: file://charts/llm-d-router
+
+  # vLLM/SGLang model servers + optional render tokenizer Service. Untouched —
+  # decode.spec is authored (verbatim) from this umbrella's values.
+  - name: llm-d-modelserver
+    version: 0.9.0
+    repository: file://charts/llm-d-modelserver

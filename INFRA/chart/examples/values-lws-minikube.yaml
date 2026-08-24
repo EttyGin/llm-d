@@ -1,0 +1,149 @@
+# =============================================================================
+# LeaderWorkerSet smoke test that ACTUALLY RUNS on a CPU minikube.
+# Qwen2.5-0.5B on CPU as a size=1 LeaderWorkerSet, no disaggregation (aggregated),
+# base load-aware routing. Proves the chart's `workload: leaderWorkerSet` mode +
+# the LWS controller + serving, end-to-end.
+#
+#   # prereqs: LWS controller, an existing Gateway, weights pre-seeded on the node
+#   kubectl apply --server-side -f \
+#     https://github.com/kubernetes-sigs/lws/releases/download/v0.6.1/manifests.yaml
+#   helm install lws . -n <ns> -f examples/values-lws-minikube.yaml
+#
+# WHY size=1 (not a real leader+worker split): a true multi-pod vLLM (one model
+# across leader + workers) needs GPUs/RDMA — DP replicates the full model per pod
+# (won't fit a CPU node) and TP needs Ray + only the leader serves HTTP. That is
+# the GPU example (values-wide-ep-lws.yaml). size=1 is a valid LWS group of one:
+# it exercises the exact same render path and controller, and serves.
+#
+# NOTE: `leaderWorkerTemplate.size` is IMMUTABLE in LWS — to change it,
+# uninstall + reinstall (helm upgrade of size is rejected by the LWS webhook).
+#
+# Minikube specifics: CPU image, weights read offline from the node hostPath
+# /data/hf-models (HF_HUB_OFFLINE=1), tiny resources. The gateway name and HF
+# secret name are the chart defaults, so they are not restated here.
+# =============================================================================
+global:
+  llmd:
+    model: &model Qwen/Qwen2.5-0.5B-Instruct       # model.name + the vLLM serve args
+    modelLabel: &modelLabel Qwen2.5-0.5B-Instruct  # model.label + InferencePool matchLabels
+    guide: &guide wide-ep-lws                       # guideLabel + InferencePool matchLabels
+
+llm-d-router:
+  llmd:
+    router:
+      # Must be restated: the umbrella's base matchLabels don't inherit this
+      # file's anchors (anchors don't cross -f files), so set them explicitly.
+      modelServers:
+        matchLabels:
+          llm-d.ai/guide: *guide
+          llm-d.ai/model: *modelLabel
+      epp:
+        replicas: 1
+        resources:
+          requests:
+            cpu: "500m"
+            memory: 1Gi
+          limits:
+            memory: 2Gi
+
+llm-d-modelserver:
+  model:
+    name: *model
+    label: *modelLabel
+  guideLabel: *guide
+  accelerator:
+    variant: cpu
+    vendor: intel
+
+  decode:
+    workload: leaderWorkerSet
+    leaderWorkerSet:
+      size: 1                         # one pod (leader); see header for why
+    image:
+      repository: vllm/vllm-openai-cpu
+      tag: v0.26.0
+    spec:
+      replicas: 1
+      template:
+        spec:
+          containers:
+            - name: modelserver
+              command: ["vllm", "serve"]
+              args:
+                - *model
+                - --served-model-name
+                - *model
+                - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+                - --max_model_len=2048
+                - --enable-prefix-caching
+              env:
+                - name: DO_NOT_TRACK
+                  value: "1"
+                - name: USER
+                  value: llm-d
+                - name: VLLM_CPU_KVCACHE_SPACE
+                  value: "1"
+                - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+                  value: "1"
+                - name: HF_HOME
+                  value: /hf-home/hf
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: llm-d-hf-token
+                      key: HF_TOKEN
+              ports:
+                - name: modelserver
+                  containerPort: 8000
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: "500m"
+                  memory: 1500Mi
+                limits:
+                  cpu: "2"
+                  memory: 5Gi
+              startupProbe:
+                httpGet:
+                  path: /v1/models
+                  port: modelserver
+                initialDelaySeconds: 15
+                periodSeconds: 15
+                timeoutSeconds: 5
+                failureThreshold: 120
+              readinessProbe:
+                httpGet:
+                  path: /v1/models
+                  port: modelserver
+                periodSeconds: 5
+                timeoutSeconds: 2
+                failureThreshold: 3
+              volumeMounts:
+                - name: shm
+                  mountPath: /dev/shm
+                - name: cache
+                  mountPath: /.cache
+                - name: triton-cache
+                  mountPath: /.triton
+                - name: vllm-config
+                  mountPath: /.config
+                - name: hf-seed
+                  mountPath: /hf-home
+                  readOnly: true
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 256Mi
+            - name: cache
+              emptyDir: {}
+            - name: triton-cache
+              emptyDir: {}
+            - name: vllm-config
+              emptyDir: {}
+            - name: hf-seed
+              hostPath:
+                path: /data/hf-models
+                type: Directory

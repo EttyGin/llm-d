@@ -1,0 +1,222 @@
+# =============================================================================
+# guides/wide-ep-lws — WITH LeaderWorkerSet (multi-node wide expert parallelism).
+# DeepSeek-R1, P/D disaggregation, DP across nodes.
+#
+#   helm install wide-ep . -n <ns> -f examples/values-wide-ep-lws.yaml
+#
+# HOW MULTI-NODE WORKS HERE — NO RAY. This guide uses vLLM's **DP Supervisor**,
+# not Ray. The LWS controller injects LWS_LEADER_ADDRESS / LWS_WORKER_INDEX /
+# LWS_GROUP_SIZE into every pod; vLLM consumes them directly via
+# --data-parallel-address / --data-parallel-start-rank / --data-parallel-*. There
+# is no `ray start` head/worker bootstrap. (Confirmed: zero Ray refs in the guide.)
+#
+# ⚠ Target: a multi-node GPU cluster (e.g. 32×H200) with the LeaderWorkerSet
+#   controller (lws.sigs.k8s.io) and RDMA. The launch script below is verbatim
+#   from the guide; the full NVSHMEM/NCCL/GLOO/RDMA env is trimmed to the
+#   essentials — copy the rest from
+#   guides/wide-ep-lws/modelserver/gpu/vllm/base/{decode,prefill}.yaml.
+#
+# Difference from values-wide-ep.yaml: workload: leaderWorkerSet + size (multi-node).
+# accelerator defaults to gpu/nvidia. Reused values (model, launch script, engine
+# env) are hoisted into _widx; the single-use sidecar image and model label inline.
+# =============================================================================
+_widx:
+  model: &model deepseek-ai/DeepSeek-R1-0528   # model.name + router tokenizer.modelName
+  # DP-supervisor launch script (verbatim from the guide; NOT Ray). Shared by
+  # decode + prefill (hence the anchor).
+  decodeScript: &decodeScript |-
+    find /dev/shm -type f -delete
+    # DP Supervisor (NOT Ray): the supervisor assigns CUDA_VISIBLE_DEVICES and
+    # --data-parallel-rank per child from LWS_WORKER_INDEX / LWS_LEADER_ADDRESS.
+    START_RANK=$(( ${LWS_WORKER_INDEX:-0} * DP_SIZE_LOCAL ))
+    exec vllm serve deepseek-ai/DeepSeek-R1-0528 \
+      --port 8200 \
+      --disable-access-log-for-endpoints=/health,/metrics \
+      --data-parallel-multi-port-external-lb \
+      --data-parallel-supervisor-port=8208 \
+      --enable-expert-parallel \
+      --tensor-parallel-size $TP_SIZE \
+      --max-num-batched-tokens ${MAX_TOKENS} --max-num-seqs ${MAX_TOKENS} \
+      --data-parallel-size $((LWS_GROUP_SIZE * DP_SIZE_LOCAL)) \
+      --data-parallel-size-local $DP_SIZE_LOCAL \
+      --data-parallel-address ${LWS_LEADER_ADDRESS} \
+      --data-parallel-rpc-port 5555 \
+      --data-parallel-start-rank $START_RANK \
+      --kv_transfer_config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}' \
+      --enable-dbo --dbo-decode-token-threshold 32 \
+      --all2all-backend deepep_low_latency --moe-backend deep_gemm
+
+# Shared engine env (essentials; add NVSHMEM/NCCL/GLOO/RDMA from the guide).
+_env: &wideEpEnv
+  - name: TP_SIZE
+    value: "1"
+  - name: DP_SIZE_LOCAL
+    value: "8"
+  - name: MAX_TOKENS
+    value: "8192"
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: llm-d-hf-token
+        key: HF_TOKEN
+  - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+    valueFrom:
+      fieldRef:
+        fieldPath: status.podIP
+  # + NVSHMEM_*, NCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME, VLLM_USE_DEEP_GEMM, …
+
+llm-d-modelserver:
+  model:
+    name: *model
+    label: DeepSeek-R1-0528
+  guideLabel: wide-ep-lws
+
+  decode:
+    workload: leaderWorkerSet
+    leaderWorkerSet:
+      size: 2                       # leader + 1 worker per replica (2 nodes)
+    containerName: vllm
+    image:
+      repository: ghcr.io/llm-d/llm-d-cuda-dev
+      tag: sha-a1bcf21
+    spec:
+      replicas: 1
+      template:
+        spec:
+          initContainers:
+            - name: routing-proxy
+              image: ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0
+              imagePullPolicy: Always
+              restartPolicy: Always
+              args:
+                - --port=8000
+                - --vllm-port=8200
+                - --data-parallel-size=8   # fans out to the DP ranks
+                - --kv-connector=nixlv2
+                - --secure-proxy=false
+                - --enable-prefiller-sampling
+              ports:
+                - name: rank0
+                  containerPort: 8000
+                  protocol: TCP
+          containers:
+            - name: vllm
+              command: ["/bin/bash", "-c"]
+              args:
+                - *decodeScript
+              env: *wideEpEnv
+              ports:
+                - name: vllm
+                  containerPort: 8200
+                  protocol: TCP
+                - name: supervisor
+                  containerPort: 8208
+                  protocol: TCP
+                - name: nixl
+                  containerPort: 5600
+                  protocol: TCP
+              resources:
+                limits:
+                  nvidia.com/gpu: "8"
+                  memory: 512Gi
+                  ephemeral-storage: 1Ti
+              volumeMounts:
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 40Gi
+
+  prefill:
+    enabled: true
+    workload: leaderWorkerSet
+    leaderWorkerSet:
+      size: 2
+    containerName: vllm
+    image:
+      repository: ghcr.io/llm-d/llm-d-cuda
+      tag: v0.8.0
+    spec:
+      replicas: 1
+      template:
+        spec:
+          containers:
+            - name: vllm
+              command: ["/bin/bash", "-c"]
+              args:
+                - *decodeScript     # same DP-supervisor launch, prefill role
+              env: *wideEpEnv
+              ports:
+                - name: vllm
+                  containerPort: 8200
+                  protocol: TCP
+                - name: supervisor
+                  containerPort: 8208
+                  protocol: TCP
+                - name: nixl
+                  containerPort: 5600
+                  protocol: TCP
+              resources:
+                limits:
+                  nvidia.com/gpu: "8"
+                  memory: 512Gi
+                  ephemeral-storage: 1Ti
+              volumeMounts:
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 40Gi
+
+llm-d-router:
+  llmd:
+    router:
+      tokenizer:
+        enabled: true
+        modelName: *model
+      modelServers:
+        matchLabels:
+          llm-d.ai/guide: "wide-ep-lws"
+      epp:
+        pluginsConfigFile: "wide-ep-lws-config.yaml"
+        pluginsCustomConfig:
+          wide-ep-lws-config.yaml: |
+            apiVersion: llm-d.ai/v1alpha1
+            kind: EndpointPickerConfig
+            plugins:
+            - type: disagg-headers-handler
+            - type: always-disagg-pd-decider
+            - type: disagg-profile-handler
+              parameters:
+                deciderPluginName: always-disagg-pd-decider
+            - type: prefill-filter
+            - type: decode-filter
+            - type: prefix-cache-scorer
+            - type: queue-scorer
+            - type: active-request-scorer
+            schedulingProfiles:
+            - name: prefill
+              plugins:
+              - pluginRef: prefill-filter
+              - pluginRef: prefix-cache-scorer
+                weight: 3
+              - pluginRef: queue-scorer
+                weight: 2
+              - pluginRef: active-request-scorer
+                weight: 2
+            - name: decode
+              plugins:
+              - pluginRef: decode-filter
+              - pluginRef: active-request-scorer
+
+# Identity — propagates to both subcharts AND to any chart wrapping the
+# umbrella. The anchors below are file-local; this global is what travels.
+global:
+  llmd:
+    model: deepseek-ai/DeepSeek-R1-0528
+    modelLabel: DeepSeek-R1-0528
+    guide: wide-ep-lws

@@ -210,8 +210,9 @@ values/base.values.yaml                             ← משאבים, ארגומ
 
 ## מדריכים נוספים בתיקייה
 
-| מדריך | מה יש בו |
+| תיקייה | מה יש בה |
 | --- | --- |
+| [`chart/`](chart/README.md) | **Umbrella chart** — release אחד שפורס Router (EPP) + model servers, עם זהות אחת ב-`global.llmd` שמתפשטת לשני ה-subcharts וגם ל-chart שעוטף את ה-umbrella. עוטף את `llm-d-router-gateway` v0.10.0 (vendored + patched) ואת ה-modelserver, עם 14 דוגמאות values. |
 | [`guides/deepseek-v4-flash-pd/`](guides/deepseek-v4-flash-pd/README.md) | DeepSeek-V4-Flash-0731 על H100 — P/D disaggregation (8 GPU prefill / 4 GPU decode), wide-EP עם DEP ו-TP=1 בלי LWS, all2all של DeepEP, CPU offloading ו-P2P KV sharing. ארוז כ-Helm chart מלא עם שכבות values שדורסות, ו-README מפורט באנגלית. |
 
 ---

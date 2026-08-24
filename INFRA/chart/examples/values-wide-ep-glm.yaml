@@ -1,0 +1,200 @@
+# =============================================================================
+# Wide expert parallelism for zai-org/GLM-5.2-FP8, WITHOUT LeaderWorkerSet —
+# single-node (all DP ranks on ONE multi-GPU node), so each role is a plain
+# Deployment. No LWS controller, no cross-node wiring.
+#
+#   helm install glm . -n <ns> -f examples/values-wide-ep-glm.yaml
+#
+# Same shape as values-wide-ep.yaml (the single-node derived variant of
+# guides/wide-ep-lws) — all DP ranks local (--data-parallel-size ==
+# --data-parallel-size-local), no LWS_LEADER_ADDRESS / --data-parallel-address /
+# start-rank, NOT Ray. Fits when the whole model + all experts fit on one node.
+#
+# FP8: the checkpoint is pre-quantized (compressed-tensors FP8) — vLLM detects it
+# from the model config, so no --quantization flag is needed. Needs FP8-capable
+# GPUs (Hopper/H100+ or newer). Size DP/TP and the GPU count to your node.
+#
+# accelerator defaults to gpu/nvidia, so it isn't restated. Only values used more
+# than once are hoisted into _widx (model, launch script, engine env); the
+# single-use sidecar image and model label are inlined at their use sites.
+# =============================================================================
+_widx:
+  model: &model zai-org/GLM-5.2-FP8   # model.name + router tokenizer.modelName
+  # Single-node launch — all DP local, no leader address, no Ray. Shared by
+  # decode + prefill (hence the anchor).
+  script: &script |-
+    find /dev/shm -type f -delete
+    pip install modelexpress          # install the client before the server starts
+    exec vllm serve zai-org/GLM-5.2-FP8 \
+      --port 8200 \
+      --disable-access-log-for-endpoints=/health,/metrics \
+      --enable-expert-parallel \
+      --tensor-parallel-size $TP_SIZE \
+      --max-num-batched-tokens ${MAX_TOKENS} --max-num-seqs ${MAX_TOKENS} \
+      --data-parallel-size $DP_SIZE_LOCAL \
+      --data-parallel-size-local $DP_SIZE_LOCAL \
+      --kv_transfer_config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail"}' \
+      --all2all-backend deepep_low_latency --moe-backend deep_gemm
+
+# Shared engine env (decode + prefill).
+_env: &wideEpEnv
+  - name: TP_SIZE
+    value: "1"
+  - name: DP_SIZE_LOCAL
+    value: "8"
+  - name: MAX_TOKENS
+    value: "8192"
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: llm-d-hf-token
+        key: HF_TOKEN
+  - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+    valueFrom:
+      fieldRef:
+        fieldPath: status.podIP
+  # + NVSHMEM_*, NCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME, VLLM_USE_DEEP_GEMM, …
+
+llm-d-modelserver:
+  model:
+    name: *model
+    label: GLM-5.2-FP8
+  guideLabel: wide-ep-lws
+
+  decode:
+    containerName: vllm
+    image:
+      repository: ghcr.io/llm-d/llm-d-cuda-dev
+      tag: sha-a1bcf21
+    spec:
+      replicas: 1
+      template:
+        spec:
+          initContainers:
+            - name: routing-proxy
+              image: ghcr.io/llm-d/llm-d-router-disagg-sidecar:v0.10.0
+              imagePullPolicy: Always
+              restartPolicy: Always
+              args:
+                - --port=8000
+                - --vllm-port=8200
+                - --data-parallel-size=8
+                - --kv-connector=nixlv2
+                - --secure-proxy=false
+                - --enable-prefiller-sampling
+              ports:
+                - name: rank0
+                  containerPort: 8000
+                  protocol: TCP
+          containers:
+            - name: vllm
+              command: ["/bin/bash", "-c"]
+              args:
+                - *script
+              env: *wideEpEnv
+              ports:
+                - name: vllm
+                  containerPort: 8200
+                  protocol: TCP
+                - name: nixl
+                  containerPort: 5600
+                  protocol: TCP
+              resources:
+                limits:
+                  nvidia.com/gpu: "8"
+                  memory: 512Gi
+                  ephemeral-storage: 1Ti
+              volumeMounts:
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 40Gi
+
+  prefill:
+    enabled: true
+    containerName: vllm
+    image:
+      repository: ghcr.io/llm-d/llm-d-cuda
+      tag: v0.8.0
+    spec:
+      replicas: 1
+      template:
+        spec:
+          containers:
+            - name: vllm
+              command: ["/bin/bash", "-c"]
+              args:
+                - *script
+              env: *wideEpEnv
+              ports:
+                - name: vllm
+                  containerPort: 8200
+                  protocol: TCP
+                - name: nixl
+                  containerPort: 5600
+                  protocol: TCP
+              resources:
+                limits:
+                  nvidia.com/gpu: "8"
+                  memory: 512Gi
+                  ephemeral-storage: 1Ti
+              volumeMounts:
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 40Gi
+
+llm-d-router:
+  llmd:
+    router:
+      tokenizer:
+        enabled: true
+        modelName: *model
+      modelServers:
+        matchLabels:
+          llm-d.ai/guide: "wide-ep-lws"
+      epp:
+        pluginsConfigFile: "wide-ep-lws-config.yaml"
+        pluginsCustomConfig:
+          wide-ep-lws-config.yaml: |
+            apiVersion: llm-d.ai/v1alpha1
+            kind: EndpointPickerConfig
+            plugins:
+            - type: disagg-headers-handler
+            - type: always-disagg-pd-decider
+            - type: disagg-profile-handler
+              parameters:
+                deciderPluginName: always-disagg-pd-decider
+            - type: prefill-filter
+            - type: decode-filter
+            - type: prefix-cache-scorer
+            - type: queue-scorer
+            - type: active-request-scorer
+            schedulingProfiles:
+            - name: prefill
+              plugins:
+              - pluginRef: prefill-filter
+              - pluginRef: prefix-cache-scorer
+                weight: 3
+              - pluginRef: queue-scorer
+                weight: 2
+              - pluginRef: active-request-scorer
+                weight: 2
+            - name: decode
+              plugins:
+              - pluginRef: decode-filter
+              - pluginRef: active-request-scorer
+
+# Identity — propagates to both subcharts AND to any chart wrapping the
+# umbrella. The anchors below are file-local; this global is what travels.
+global:
+  llmd:
+    model: zai-org/GLM-5.2-FP8
+    modelLabel: GLM-5.2-FP8
+    guide: wide-ep-lws
