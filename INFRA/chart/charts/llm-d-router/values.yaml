@@ -1,0 +1,164 @@
+# llm-d Router (EPP) — wrapper chart defaults.
+#
+# A THIN WRAPPER over the official chart
+#   oci://ghcr.io/llm-d/charts/llm-d-router-gateway   (v0.10.0, vendored)
+# It adds no templates of its own. Everything under `llmd:` is passed straight
+# through, so these keys mirror the upstream chart's own hierarchy exactly —
+# nested one level under `llmd:` (the dependency alias).
+#
+# IDENTITY: the fields that also exist in `global.llmd.*` are left EMPTY here on
+# purpose. The vendored chart is patched to fall back to the globals, so the
+# model / guide / gateway are written ONCE at the umbrella level and fan out to
+# every consumer — including a parent chart that wraps this umbrella. Setting
+# one of them here wins over the global; that is the escape hatch, not the
+# default. See ../../PATCHES.md.
+
+llmd:
+  provider:
+    # none | agentgateway | istio | gke
+    # agentgateway is the preferred self-installed provider as of llm-d v0.9.0;
+    # kgateway is deprecated and slated for removal in the next release.
+    name: istio
+
+    istio:
+      destinationRule:
+        # Override the default calculated host.
+        host: ""
+        trafficPolicy: {}
+
+    gke:
+      # Split the pool into a PREFERRED active tier and a DEFAULT standby tier.
+      # New in the v0.10.0 chart.
+      preferredBackends:
+        enabled: false
+        preferredReplicas: 1
+        defaultReplicas: 1
+        balancingMode: RATE
+        maxRatePerEndpoint: 100
+        capacityScalerPercent: 100
+
+  httpRoute:
+    # Gateway mode. The umbrella turns this on; standalone mode leaves it off.
+    create: false
+    # EMPTY -> global.llmd.gateway (patched fallback).
+    inferenceGatewayName: ""
+    inferenceGatewayNamespace: ""
+    # 0s means "the provider's maximum" on most implementations.
+    requestTimeout: "0s"
+
+  router:
+    modelServers:
+      type: vllm            # vllm | sglang | trtllm
+      protocol: http        # http | grpc
+      targetPorts:
+        - number: 8000
+      # EMPTY -> derived from global.llmd.guide + global.llmd.modelLabel
+      # (patched fallback). Set it here only to select on something else.
+      matchLabels: {}
+
+    inferencePool:
+      create: true
+      failureMode: "FailOpen"
+
+    inferenceObjectives: []
+
+    epp:
+      image:
+        registry: ghcr.io/llm-d
+        # NOTE: the v0.9.0 chart defaulted to `-endpoint-picker-dev`; v0.10.0
+        # drops the -dev suffix. Pinned explicitly so neither default surprises.
+        repository: llm-d-router-endpoint-picker
+        tag: v0.10.0
+        pullPolicy: IfNotPresent
+
+      replicas: 1
+
+      flags:
+        v: 2
+
+      # New in the v0.10.0 chart.
+      podAnnotations: {}
+
+      env: []
+
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+        limits:
+          memory: 16Gi
+
+      # Stock upstream default. Every routing overlay selects its own config
+      # file and supplies it under pluginsCustomConfig — the upstream mechanism.
+      pluginsConfigFile: "default-plugins.yaml"
+      pluginsCustomConfig: {}
+
+    # ── Tokenizer SIDECAR ────────────────────────────────────────────────────
+    # OFF, matching the upstream v0.10.0 default and the llm-d v0.9.0 guides.
+    #
+    # Tokenization is only needed when the EPP plugin chain contains a
+    # `token-producer` (precise prefix-cache routing, P2P source selection).
+    # Load-aware and approximate-prefix routing need no tokenizer at all.
+    #
+    # When it IS needed, the v0.9.0 guides serve it from a render SERVICE that
+    # fronts the model server pods rather than from this per-EPP-pod sidecar —
+    # `vllm serve` already exposes /v1/*/render, so render capacity scales with
+    # the model server fleet instead of with the EPP replica count. Choose the
+    # topology once at the umbrella level: `render.mode` in the parent values.
+    tokenizer:
+      enabled: false
+      # EMPTY -> global.llmd.model (patched fallback).
+      modelName: ""
+      image:
+        registry: docker.io
+        repository: vllm/vllm-openai-cpu
+        tag: v0.26.0
+        pullPolicy: IfNotPresent
+      port: 8000
+      command: []
+      args: []
+      # New in the v0.10.0 chart.
+      extraArgs: []
+      initContainers: []
+      volumes: []
+      volumeMounts: []
+      env: []
+      resources:
+        requests:
+          cpu: "4"
+          memory: 8Gi
+
+    # ── Sidecar proxy ────────────────────────────────────────────────────────
+    # OFF and left alone: this wrapper vendors the GATEWAY chart, where the
+    # Gateway provider's data plane is the proxy. The gateway chart ships no
+    # proxy image defaults and no Envoy ConfigMap, so enabling this renders an
+    # unnamed, imageless container — use `llm-d-router-standalone` for
+    # standalone mode instead.
+    proxy:
+      enabled: false
+
+    # EPP cluster-scoped RBAC — the /metrics-auth ClusterRole and its binding.
+    # VENDORED PATCH (see ../../PATCHES.md): upstream has no opt-out.
+    #   create: false + existingName: X  -> bind to an existing ClusterRole
+    #   create: false + existingName: "" -> create nothing (pre-provision both)
+    rbac:
+      clusterRole:
+        create: true
+        existingName: ""
+
+    monitoring:
+      interval: "10s"
+      prometheus:
+        enabled: false
+        auth:
+          enabled: true
+
+    tracing:
+      enabled: false
+      otelExporterEndpoint: "http://otel-collector:4317"
+      sampling:
+        sampler: "parentbased_traceidratio"
+        samplerArg: "0.1"
+
+    latencyPredictor:
+      enabled: false

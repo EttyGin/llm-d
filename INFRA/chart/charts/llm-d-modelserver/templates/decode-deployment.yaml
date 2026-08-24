@@ -1,0 +1,13 @@
+{{- if .Values.decode.enabled }}
+{{- /*
+  Primary model server. Aggregated (prefill OFF): role=prefill-decode, named
+  <release>-modelserver. Disaggregated (prefill ON): role=decode, <release>-decode.
+  workload: deployment (default) | leaderWorkerSet (wide-EP / multi-node DP).
+*/ -}}
+{{- $a := dict "root" $ "role" (include "llm-d-modelserver.decodeRole" .) "nameSuffix" (include "llm-d-modelserver.decodeSuffix" .) "cfg" .Values.decode }}
+{{- if eq (.Values.decode.workload | default "deployment") "leaderWorkerSet" }}
+{{- include "llm-d-modelserver.serverLeaderWorkerSet" $a }}
+{{- else }}
+{{- include "llm-d-modelserver.serverDeployment" $a }}
+{{- end }}
+{{- end }}

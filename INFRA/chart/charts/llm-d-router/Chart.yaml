@@ -1,0 +1,16 @@
+apiVersion: v2
+name: llm-d-router
+description: >-
+  llm-d Router (EPP). Thin wrapper over the official llm-d-router-gateway chart
+  (vendored, patched: bring-your-own EPP ClusterRole + global.llmd identity
+  fan-out). See PATCHES.md before bumping the OCI version.
+type: application
+version: 0.9.0
+appVersion: v0.10.0
+dependencies:
+  # Official llm-d chart, pulled from OCI. Bump `version` and re-run
+  # `helm dependency update charts/llm-d-router` to move to a new release.
+  - name: llm-d-router-gateway
+    alias: llmd
+    version: v0.10.0
+    repository: oci://ghcr.io/llm-d/charts

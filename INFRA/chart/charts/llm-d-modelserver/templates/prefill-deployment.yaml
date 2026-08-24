@@ -1,0 +1,8 @@
+{{- if .Values.prefill.enabled }}
+{{- $a := dict "root" $ "role" "prefill" "cfg" .Values.prefill }}
+{{- if eq (.Values.prefill.workload | default "deployment") "leaderWorkerSet" }}
+{{- include "llm-d-modelserver.serverLeaderWorkerSet" $a }}
+{{- else }}
+{{- include "llm-d-modelserver.serverDeployment" $a }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,375 @@
+# llm-d model servers — chart defaults.
+#
+# The `decode.spec` block below is shaped EXACTLY like the upstream kustomize
+# patch (guides/.../modelserver/gpu/vllm/base/patch-vllm.yaml) — it is the
+# Deployment's `spec:` and is rendered verbatim. The chart only injects what the
+# kustomize base + labels transformer inject: metadata, the guide labels
+# (InferencePool selector), the selector, the pod-template labels, and the
+# ServiceAccount. Everything else is yours, kustomize-style.
+#
+# Real configs come from the layered overlays, which mirror the patches:
+#   -f values/modelserver/base.values.yaml -f values/modelserver/gpu-vllm.yaml
+#
+# YOU are responsible (as with kustomize) for keeping these consistent with the
+# router config: the model name in `vllm serve <model>` and the kv-events topic,
+# --block-size, and the :5556 kv-events port.
+
+# ---- IDENTITY ----
+# All of these resolve from `global.llmd.*` when left EMPTY, so the model, guide
+# and accelerator are written ONCE at the umbrella level and fan out here, to the
+# router, and to any parent chart that wraps the umbrella. Setting one here wins
+# over the global — that is the per-deployment escape hatch, not the default.
+model:
+  # Full model name. Used by the render pool, the autoscaling query's model_name
+  # label, and nothing else — the name vLLM actually serves lives in
+  # decode.spec args, which is yours to author.
+  name: ""                       # -> global.llmd.model
+  # Short form for the llm-d.ai/model label (no "/" allowed).
+  label: ""                      # -> global.llmd.modelLabel
+
+# InferencePool selector — the router selects on this. Also names the render
+# Service (<guide>-render).
+guideLabel: ""                   # -> global.llmd.guide
+
+accelerator:
+  variant: ""                    # -> global.llmd.accelerator.variant (gpu)
+  vendor: ""                     # -> global.llmd.accelerator.vendor (nvidia)
+
+# ---- ServiceAccount (kustomize base owns this) ----
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# HF token secret — referenced by the render Service below. For decode, put an
+# HF_TOKEN env in decode.spec directly (or omit for public models).
+hfTokenSecret:
+  # Set false for public models (render pod). Decode's HF_TOKEN, if needed,
+  # goes in decode.spec env directly.
+  enabled: true
+  name: ""                       # -> global.llmd.hfTokenSecret.name
+  key: ""                        # -> global.llmd.hfTokenSecret.key
+
+# ---------------------------------------------------------------------------
+# decode.spec == patch-vllm.yaml `spec:`, verbatim.
+# ---------------------------------------------------------------------------
+decode:
+  enabled: true
+
+  # ---- Additive knobs: merged onto decode.spec below WITHOUT restating it ----
+  # Layer these from a separate -f file to customize the base overlay.
+  # Which container in decode.spec the extra* below target:
+  containerName: modelserver
+  extraArgs: []            # appended to that container's args
+  extraEnv: []             # appended to that container's env
+  extraVolumeMounts: []    # appended to that container's volumeMounts
+  extraVolumes: []         # appended to the pod's volumes
+  podLabels: {}            # added to the pod template labels
+  podAnnotations: {}       # added to the pod template annotations
+  deploymentAnnotations: {} # added to the Deployment's annotations
+  containerSecurityContext: {} # sets securityContext on the target container
+  podSecurityContext: {}       # sets pod-level securityContext
+  imagePullSecrets: []         # sets pod imagePullSecrets
+
+  # Optional image override for the target container. When repository is set the
+  # chart builds "<repository>:<tag>" and overrides the image in decode.spec —
+  # lets a parent chart single-source the tag while keeping decode.spec verbatim.
+  image: {}                    # e.g. { repository: vllm/vllm-openai, tag: v0.26.0 }
+  # Workload type: deployment (default) or leaderWorkerSet (wide-EP / multi-node
+  # DP — needs the LeaderWorkerSet controller). In LWS mode the authored `spec`
+  # (below) becomes the workerTemplate pod spec; replicas comes from spec.replicas.
+  workload: deployment
+  leaderWorkerSet:
+    size: 2                      # leader + (size-1) workers per replica
+
+  # ---- ModelExpress P2P weight/JIT-cache transfer (optional) ----
+  # When enabled, the chart wires the server for ModelExpress the same way as
+  # modelexpress/examples/dynamo_p2p_transfer_k8s/vllm (single node):
+  #   - an init container `pip install`s the client into a shared dir BEFORE the
+  #     server starts, exposed to it via PYTHONPATH=/mx-client;
+  #   - `--load-format=<loadFormat>` is appended to the server args;
+  #   - the two address env vars (MODEL_EXPRESS_URL + MX_SERVER_ADDRESS) are set.
+  # NOTE: --load-format is appended as a flag, so the target container must be a
+  # direct-exec `command: [vllm, serve]` with args as vLLM flags. For a shell
+  # script container (command: [bash, -c]), bake `--load-format mx` into the
+  # script yourself and set loadFormat: "" here.
+  modelExpress:
+    enabled: false
+    serverAddress: ""        # host:port of the ModelExpress server → MODEL_EXPRESS_URL + MX_SERVER_ADDRESS
+    loadFormat: mx           # appended as --load-format=<v> (mx | modelexpress); "" to skip
+    install: true            # pip install the client in an init container before the server starts
+    package: modelexpress    # pip package (add ==x.y.z to pin)
+    installImage: ""         # image for the install init container (default: the server container's image)
+    artifactTransfer: true   # sets MX_ARTIFACT_TRANSFER=1
+    extraEnv: []             # extra MX_*/UCX_*/NIXL_* env from the guide (e.g. MX_ARTIFACT_READY_URL)
+
+  # ---- The verbatim patch (== patch-vllm.yaml `spec:`) ----
+  spec:
+    replicas: 1
+    # strategy: {}                 # optional, e.g. Recreate
+    template:
+      # metadata:                  # optional extra pod labels/annotations
+      #   annotations: {}
+      #   labels: {}
+      spec:
+        containers:
+          - name: modelserver
+            image: vllm/vllm-openai:v0.26.0
+            imagePullPolicy: IfNotPresent
+            command: ["vllm", "serve"]
+            args:
+              - Qwen/Qwen3-32B
+              - --disable-access-log-for-endpoints=/health,/metrics,/v1/models
+              - --tensor-parallel-size=1
+              - --block-size=64
+              - --kv-events-config
+              - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@Qwen/Qwen3-32B"}'
+            ports:
+              - name: modelserver
+                containerPort: 8000
+                protocol: TCP
+              - name: kv-events
+                containerPort: 5556
+                protocol: TCP
+            env:
+              - name: NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: POD_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.podIP
+              - name: POD_PORT
+                value: "8000"
+              - name: KV_EVENTS_ENDPOINT
+                value: "tcp://*:5556"
+              - name: DO_NOT_TRACK
+                value: "1"
+              - name: USER
+                value: llm-d
+            resources:
+              limits:
+                cpu: "16"
+                memory: 128Gi
+                nvidia.com/gpu: 2
+              requests:
+                cpu: "8"
+                memory: 96Gi
+                nvidia.com/gpu: 2
+            startupProbe:
+              httpGet:
+                path: /v1/models
+                port: modelserver
+              initialDelaySeconds: 15
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 120
+            livenessProbe:
+              httpGet:
+                path: /health
+                port: modelserver
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+            readinessProbe:
+              httpGet:
+                path: /v1/models
+                port: modelserver
+              periodSeconds: 5
+              timeoutSeconds: 2
+              failureThreshold: 3
+            volumeMounts:
+              - name: shm
+                mountPath: /dev/shm
+              - name: cache
+                mountPath: /.cache
+              - name: triton-cache
+                mountPath: /.triton
+              - name: vllm-config
+                mountPath: /.config
+        volumes:
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 20Gi
+          - name: cache
+            emptyDir: {}
+          - name: triton-cache
+            emptyDir: {}
+          - name: vllm-config
+            emptyDir: {}
+
+# ---------------------------------------------------------------------------
+# prefill — the P role for P/D disaggregation. OFF by default. It is the SAME
+# Deployment shape as decode (rendered by the same template partial), so it has
+# EVERY decode knob with the same names/shape: spec (verbatim), image (override),
+# extraArgs/extraEnv/extraVolumeMounts/extraVolumes, podLabels/podAnnotations/
+# deploymentAnnotations, containerSecurityContext/podSecurityContext,
+# imagePullSecrets. Replicas/resources/parallelism live in prefill.spec, exactly
+# like decode.spec; PVC via extraVolumes+extraVolumeMounts; the ServiceAccount is
+# the shared serviceAccount.* above.
+#
+# ⚠ ENABLING PREFILL IS P/D MODE, AND IT MUTATES THE DECODE POD. In P/D the
+#   decode pod must ALSO gain: the routing-proxy sidecar, a vLLM port shift to
+#   8200, the `nixl` port, and the NIXL kv-transfer config/env. Those live in
+#   YOUR decode.spec — see examples/values-pd-disaggregation.yaml. The umbrella's
+#   validation fails fast if prefill.enabled is true while decode.spec is missing
+#   the sidecar or the port shift.
+# ---------------------------------------------------------------------------
+prefill:
+  enabled: false
+
+  # Same additive extension surface as decode.
+  containerName: modelserver
+  extraArgs: []
+  extraEnv: []
+  extraVolumeMounts: []
+  extraVolumes: []
+  podLabels: {}
+  podAnnotations: {}
+  deploymentAnnotations: {}
+  containerSecurityContext: {}
+  podSecurityContext: {}
+  imagePullSecrets: []
+  image: {}                    # e.g. { repository: vllm/vllm-openai, tag: v0.26.0 }
+  # Workload type: deployment (default) or leaderWorkerSet (wide-EP / multi-node
+  # DP — needs the LeaderWorkerSet controller). In LWS mode the authored `spec`
+  # (below) becomes the workerTemplate pod spec; replicas comes from spec.replicas.
+  workload: deployment
+  leaderWorkerSet:
+    size: 2                      # leader + (size-1) workers per replica
+
+  # Same ModelExpress knob as decode (see decode.modelExpress above).
+  modelExpress:
+    enabled: false
+    serverAddress: ""
+    loadFormat: mx
+    install: true
+    package: modelexpress
+    installImage: ""
+    artifactTransfer: true
+    extraEnv: []
+
+  # Lean placeholder spec — provide the real P/D prefill spec (NIXL kv-transfer
+  # config, VLLM_NIXL_SIDE_CHANNEL_HOST, the nixl port) via your values; the PD
+  # example does this. Same verbatim-`spec` contract as decode.
+  spec:
+    replicas: 1
+    template:
+      spec:
+        containers:
+          - name: modelserver
+            imagePullPolicy: IfNotPresent
+            command: ["vllm", "serve"]
+            args: []
+            ports:
+              - name: modelserver
+                containerPort: 8000
+                protocol: TCP
+
+# ---------------------------------------------------------------------------
+# Standalone `vllm launch render` tokenizer Service. This is infra the chart
+# owns (there is no upstream "patch" for it — it is render/deployment.yaml), so
+# it stays structured. Disable it with the tokenizer-sidecar feature.
+# ---------------------------------------------------------------------------
+render:
+  # none | service | standalone   (see templates/render.yaml for the full note)
+  #   service     DEFAULT, and the llm-d v0.9.0 recommendation for vLLM: a
+  #               Service with NO pods of its own, fronting the model servers.
+  #               It costs nothing to leave on — a Service object is not a
+  #               workload — so the recommended topology is already in place the
+  #               moment you add a `token-producer` to the EPP config.
+  #   standalone  dedicated GPU-less `vllm launch render` pool. REQUIRED for
+  #               SGLang, which has no render endpoints. This one DOES run pods,
+  #               so validations.yaml rejects it when nothing tokenizes.
+  #   none        no render endpoint at all. Use it when the EPP tokenizes in
+  #               its own sidecar instead.
+  mode: service
+  # Legacy alias: enabled:true with no mode == standalone.
+  enabled: false
+  # Override which role the mode=service Service fronts. Empty derives it:
+  # prefill under P/D (decode's 8000 is the routing sidecar), prefill-decode
+  # when aggregated.
+  selectorRole: ""
+  # Named container port on the model server pods (mode=service only).
+  modelServerPortName: modelserver
+  # --- standalone-only below ---
+  replicas: 3
+  image:
+    repository: docker.io/vllm/vllm-openai-cpu
+    tag: ""                      # -> global.llmd.vllmVersion
+    pullPolicy: IfNotPresent
+  port: 8000
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+  extraVolumes: []
+  extraVolumeMounts: []
+  annotations: {}
+  podLabels: {}
+  serviceAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  imagePullSecrets: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---- Prometheus PodMonitor for decode (separate resource) ----
+monitoring:
+  podMonitor:
+    enabled: false
+    interval: 30s
+    path: /metrics
+
+# ---- KEDA autoscaling (separate resource; see values/features/autoscaling-keda.yaml) ----
+autoscaling:
+  keda:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 8
+    pollingInterval: 15
+    cooldownPeriod: 300
+    eppServiceName: ""
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+      scaleDown:
+        stabilizationWindowSeconds: 300
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+    prometheus:
+      serverAddress: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+      auth:
+        enabled: false
+        name: keda-prometheus-auth
+        create: true
+        secretTargetRef:
+          - parameter: ca
+            name: keda-prometheus-auth
+            key: ca.crt
+    triggers:
+      - name: epp-running-requests
+        enabled: true
+        metricType: AverageValue
+        query: >-
+          sum(llm_d_epp_request_running{namespace="{{ .Release.Namespace }}",service="{{ .eppService }}",model_name="{{ .Values.model.name }}"})
+        threshold: "16"
+      - name: epp-queue-size
+        enabled: false
+        metricType: AverageValue
+        query: >-
+          sum(llm_d_epp_flow_control_queue_size{namespace="{{ .Release.Namespace }}",service="{{ .eppService }}",model_name="{{ .Values.model.name }}"})
+        threshold: "1"

@@ -1,0 +1,14 @@
+# The repository root ignores `**/charts/` — there it means Helm output that
+# kustomize generates and nobody should commit. In THIS tree `charts/` holds
+# real, hand-maintained content: the pulled OCI charts and, under
+# chart/charts/, the two subcharts of the umbrella (one of which is a vendored,
+# patched tgz that the chart cannot render without).
+#
+# Re-include them. Without this the umbrella pushes as 20 files with no
+# subcharts and does not render for anyone who clones it.
+!charts/
+!chart/charts/
+!chart/charts/**
+
+# The root also ignores CLAUDE.md. This tree's notes are deliberate content.
+!CLAUDE.md

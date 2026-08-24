@@ -1,0 +1,35 @@
+{{- if .Values.monitoring.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "llm-d-modelserver.decodeName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-modelserver.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "llm-d-modelserver.roleSelectorLabels" (dict "root" . "role" (include "llm-d-modelserver.decodeRole" .)) | nindent 6 }}
+  podMetricsEndpoints:
+    - port: modelserver
+      path: {{ .Values.monitoring.podMonitor.path }}
+      interval: {{ .Values.monitoring.podMonitor.interval }}
+{{- if .Values.prefill.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "llm-d-modelserver.name" . }}-prefill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-modelserver.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "llm-d-modelserver.roleSelectorLabels" (dict "root" . "role" "prefill") | nindent 6 }}
+  podMetricsEndpoints:
+    - port: modelserver
+      path: {{ .Values.monitoring.podMonitor.path }}
+      interval: {{ .Values.monitoring.podMonitor.interval }}
+{{- end }}
+{{- end }}
