@@ -6,15 +6,12 @@
 # Upgrades the base's generic queue+KV routing to prefix-cache-AFFINITY routing:
 # narrows candidates to endpoints with high estimated prompt-prefix cache reuse
 # (approximate — no kv-events needed), with a load-aware token scorer. Needs the
-# EPP tokenizer sidecar. The base model server already matches this guide's
 # sizing (Qwen3-32B, TP=2, 8 replicas).
 # =============================================================================
 llm-d-router:
   llmd:
     router:
       # Approx prefix-cache producer tokenizes requests → sidecar required.
-      tokenizer:
-        enabled: true
       epp:
         pluginsConfigFile: "optimized-baseline-plugins.yaml"
         pluginsCustomConfig:

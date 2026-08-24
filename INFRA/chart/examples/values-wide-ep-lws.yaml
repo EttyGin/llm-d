@@ -175,9 +175,6 @@ llm-d-modelserver:
 llm-d-router:
   llmd:
     router:
-      tokenizer:
-        enabled: true
-        modelName: *model
       modelServers:
         matchLabels:
           llm-d.ai/guide: "wide-ep-lws"

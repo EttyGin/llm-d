@@ -306,14 +306,18 @@ llm-d-modelserver:
     enabled: false
 
   # ---- Render (tokenizer) endpoint ----
-  # none | service | standalone. Deploy one ONLY when the EPP plugin chain has a
-  # `token-producer` — the default load-aware policy above does not.
-  #   service     Service with no pods, fronting the model servers. Costs
-  #               nothing to run and scales with the fleet. Use this for vLLM.
+  # DEFAULT = `service`, the llm-d v0.9.0 recommendation: a Service with NO pods
+  # of its own, fronting the model servers, which already serve the render
+  # endpoints. It is free to leave on (a Service is not a workload) and render
+  # capacity then scales with the serving fleet rather than with EPP replicas —
+  # which matters because the render call sits inside TTFT.
+  #
+  #   service     the default, above.
   #   standalone  dedicated GPU-less `vllm launch render` pool. REQUIRED for
-  #               SGLang (no /v1/*/render endpoints).
+  #               SGLang, which has no render endpoints. Runs real pods.
+  #   none        nothing — for when the EPP tokenizes in its own sidecar.
   render:
-    mode: none
+    mode: service
 
   monitoring:
     podMonitor:

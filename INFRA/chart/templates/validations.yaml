@@ -125,19 +125,35 @@ string and vLLM args are deliberately hand-authored.
 {{- end }}
 
 {{- /* ---------- tokenizer topology ----------
-  A `token-producer` needs SOMETHING to tokenize against: the render Service, the
-  standalone render pool, or the EPP sidecar. Exactly one, and at least one.
+  A `token-producer` needs SOMETHING serving the render endpoints. Three things
+  can: the render Service (no pods — free), the standalone render pool (real
+  pods), or the EPP sidecar (real containers).
+
+  The asymmetry below is deliberate. `render.mode: service` is the default and
+  is NOT rejected when nothing tokenizes: a Service with no pods is not a
+  workload, so leaving it on costs nothing and the recommended topology is
+  already in place the moment a token-producer appears. `standalone` and the
+  sidecar DO run pods, so they are rejected when nothing would ever call them.
 */ -}}
 {{- $needsTokenizer := contains "token-producer" $pluginText -}}
 {{- $renderMode := dig "render" "mode" "" $ms -}}
-{{- if not $renderMode }}{{- $renderMode = ternary "standalone" "none" (dig "render" "enabled" false $ms) -}}{{- end }}
+{{- if not $renderMode }}{{- $renderMode = ternary "standalone" "service" (dig "render" "enabled" false $ms) -}}{{- end }}
 {{- $sidecar := dig "llmd" "router" "tokenizer" "enabled" false $router -}}
+
+{{- /* nothing serves render, but the EPP wants to tokenize */ -}}
 {{- if and $needsTokenizer (eq $renderMode "none") (not $sidecar) }}
-{{- fail "the EPP plugin config uses `token-producer` but nothing serves /v1/*/render: set llm-d-modelserver.render.mode to `service` (recommended for vLLM) or `standalone` (required for SGLang), or enable the EPP sidecar with llm-d-router.llmd.router.tokenizer.enabled=true." }}
+{{- fail "the EPP plugin config uses `token-producer` but nothing serves the render endpoints: set llm-d-modelserver.render.mode to `service` (the default and the recommendation for vLLM) or `standalone` (required for SGLang), or enable the EPP sidecar with llm-d-router.llmd.router.tokenizer.enabled=true." }}
 {{- end }}
-{{- if and (ne $renderMode "none") $sidecar }}
-{{- fail (printf "two tokenizers configured: render.mode=%s AND the EPP tokenizer sidecar. Pick one — the sidecar is per-EPP-pod loopback, the render Service is shared. llm-d v0.9.0 prefers the Service." $renderMode) }}
+
+{{- /* two tokenizers, and something actually uses them */ -}}
+{{- if and $needsTokenizer (ne $renderMode "none") $sidecar }}
+{{- fail (printf "two tokenizers configured: render.mode=%s AND the EPP tokenizer sidecar. Pick one — the sidecar is per-EPP-pod loopback, so its capacity tracks EPP replicas; the render Service tracks the serving fleet. llm-d v0.9.0 prefers the Service." $renderMode) }}
 {{- end }}
-{{- if and (not $needsTokenizer) (ne $renderMode "none") }}
-{{- fail (printf "llm-d-modelserver.render.mode=%s but the EPP plugin config has no `token-producer` — nothing would ever call it. Set render.mode=none, or add the plugin." $renderMode) }}
+
+{{- /* pods running for a tokenizer nobody calls */ -}}
+{{- if and (not $needsTokenizer) (eq $renderMode "standalone") }}
+{{- fail "llm-d-modelserver.render.mode=standalone runs a dedicated render pool, but the EPP plugin config has no `token-producer` — nothing would ever call it. Use render.mode=service (free, no pods) or add the plugin." }}
+{{- end }}
+{{- if and (not $needsTokenizer) $sidecar }}
+{{- fail "the EPP tokenizer sidecar is enabled but the plugin config has no `token-producer` — the container would run unused. Turn it off, or add the plugin." }}
 {{- end }}

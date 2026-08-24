@@ -20,7 +20,6 @@
 # --quantization flag. Needs FP8-capable GPUs (Hopper/H100+). Retune TP/DP/GPU
 # count to your node. accelerator defaults to gpu/nvidia. The launch script and
 # engine env are used once (one server), so they're inlined rather than hoisted;
-# only the model name — reused by model.name + tokenizer.modelName — is anchored.
 # =============================================================================
 _widx:
   model: &model zai-org/GLM-5.2-FP8   # model.name + router tokenizer.modelName
@@ -110,9 +109,6 @@ llm-d-modelserver:
 llm-d-router:
   llmd:
     router:
-      tokenizer:
-        enabled: true
-        modelName: *model
       modelServers:
         matchLabels:
           llm-d.ai/guide: "wide-ep-agg"

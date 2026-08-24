@@ -3,7 +3,7 @@
 {{- $ms := index .Values "llm-d-modelserver" | default dict -}}
 {{- $gwMode := dig "llmd" "httpRoute" "create" false $router -}}
 {{- $renderMode := dig "render" "mode" "" $ms -}}
-{{- if not $renderMode }}{{- $renderMode = ternary "standalone" "none" (dig "render" "enabled" false $ms) -}}{{- end -}}
+{{- if not $renderMode }}{{- $renderMode = ternary "standalone" "service" (dig "render" "enabled" false $ms) -}}{{- end -}}
 llm-d {{ .Chart.AppVersion }} is deploying — Router (EPP) + model servers, wired from one identity.
 
   Model      {{ $g.model }}

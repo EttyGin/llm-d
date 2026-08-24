@@ -108,33 +108,65 @@ Additive knobs merge onto `spec` without restating it: `extraArgs`, `extraEnv`,
 `extraVolumeMounts`, `extraVolumes`, `podAnnotations`, `deploymentAnnotations`,
 `containerSecurityContext`, `podSecurityContext`, `imagePullSecrets`, `image`.
 
-## Tokenization: sidecar, Service, or nothing
+## Tokenization — what `token-producer` actually needs, and why
 
-The EPP only needs a tokenizer when its plugin chain contains a
-`token-producer` — precise prefix-cache routing and P2P source selection do,
-load-aware and approximate-prefix routing do **not**. Do not deploy one unused.
+### Why a router needs a tokenizer at all
 
-`llm-d-modelserver.render.mode` picks the topology:
+The EPP routes on **prefix reuse**: "which pod already holds the KV blocks for
+this prompt's prefix?" vLLM keys those blocks by hashing **token IDs**, in
+fixed-size groups (`--block-size`). Not characters — token IDs, produced by that
+specific model's vocabulary.
 
-| mode | What it deploys | When |
+So to look a prompt up in that index, the EPP must first turn the text into the
+exact same token IDs the engine would produce, then hash them the same way. Two
+prompts that look similar in text can tokenize completely differently; one wrong
+token means a different hash, which means a miss.
+
+The EPP has no tokenizer of its own — tokenizers are model-specific artifacts,
+not something a Go router can carry. So the `token-producer` plugin makes an
+HTTP call to a vLLM **render** endpoint (`/v1/completions/render`,
+`/v1/chat/completions/render`), which returns the token IDs. That call is the
+entire job, and it is why:
+
+* `token-producer.modelName` must equal the served model — a different
+  vocabulary produces different IDs, so every lookup misses **silently**;
+* `tokenProcessorConfig.blockSize`/`blockSizeTokens` must equal vLLM's
+  `--block-size` — group the same IDs differently and the hashes never line up;
+* the render call sits **inside TTFT**: every request is tokenized before it is
+  routed, so render latency is request latency.
+
+### Which routing modes need it
+
+| Plugin | Tokenizer? | Why |
 | --- | --- | --- |
-| `none` *(default)* | nothing | no `token-producer` in the plugin chain |
-| `service` | a Service with **no pods**, fronting the model servers | **the llm-d v0.9.0 default for vLLM.** `vllm serve` already exposes the render endpoints, so render capacity scales with the serving fleet and costs no extra pods |
-| `standalone` | a dedicated GPU-less `vllm launch render` Deployment | **required for SGLang** (no render endpoints), or when you would rather not spend model-server CPU on tokenization |
+| `queue-scorer`, `kv-cache-utilization-scorer`, `active-request-scorer` | **no** | they read engine metrics; the prompt is irrelevant |
+| `approx-prefix-cache-producer` | **no** | it models the cache from the router's own routing history — it never needs exact token IDs. (The upstream `optimized-baseline` guide runs it with no tokenizer at all.) |
+| `precise-prefix-cache-producer` | **yes** | it indexes real KV-block hashes from engine events, so lookups must be in the same token space |
+| `p2p-source-producer` | **yes** | it compares prefix holdings across pods, on that same index |
+
+If your plugin chain has no `token-producer`, deploying a tokenizer is pure
+waste. `validations.yaml` rejects the wasteful combinations.
+
+### The three topologies
+
+`llm-d-modelserver.render.mode`:
+
+| mode | Deploys | Notes |
+| --- | --- | --- |
+| **`service`** *(default)* | a Service with **no pods**, fronting the model servers | **The llm-d v0.9.0 recommendation for vLLM.** `vllm serve` already exposes the render endpoints, so render capacity scales with the serving fleet. A Service object is not a workload, so this costs nothing even before you add a `token-producer` — the recommended topology is simply already in place. |
+| `standalone` | a dedicated GPU-less `vllm launch render` Deployment | **Required for SGLang**, which has no render endpoints. Also useful when you would rather not spend model-server CPU on tokenization. Runs real pods. |
+| `none` | nothing | For when the EPP tokenizes in its own sidecar instead. |
 
 The **EPP sidecar** (`llm-d-router.llmd.router.tokenizer.enabled`) is a fourth
-option and is **off** — matching both upstream v0.10.0 and the llm-d v0.9.0
-guides. It is per-EPP-pod loopback, so render capacity is tied to the EPP
-replica count rather than to the fleet. The v0.9.0 guides moved away from it
-because render latency sits inside TTFT: a separately-scheduled pool saturates
-before the model servers do.
-
-`validations.yaml` enforces the coherence — a `token-producer` with no
-tokenizer fails, two tokenizers fail, and a tokenizer nobody calls fails.
+option and is **off**, matching both upstream v0.10.0 and the llm-d v0.9.0
+guides. It is per-EPP-pod loopback, so render capacity tracks the EPP replica
+count rather than the fleet. The v0.9.0 guides moved away from it because a
+separately-scheduled render pool saturates before the model servers do, and that
+latency lands inside TTFT.
 
 Under P/D, `mode: service` fronts the **prefill** pods automatically: the decode
-pod's port 8000 belongs to the routing sidecar, not to vLLM. Derived, not
-restated — override with `render.selectorRole`.
+pod's port 8000 belongs to the routing sidecar, not to vLLM. Derived from
+`prefill.enabled`, not restated — override with `render.selectorRole`.
 
 ## Guards
 
@@ -151,7 +183,9 @@ are hand-authored:
   (upstream spells it both ways; an earlier version of this guard matched only
   the first and went silently dead against the second)
 * P/D mode: the decode pod actually has a routing sidecar and a port shift
-* tokenizer coherence, as above
+* tokenizer coherence, and deliberately asymmetric: `service` is never
+  rejected for being unused (no pods, no cost), while `standalone` and the EPP
+  sidecar are — they run containers nobody would call
 * KEDA needs `eppServiceName`
 
 ## Examples
@@ -181,8 +215,11 @@ helm install my-llm-d . -n <ns> -f my-values.yaml -f examples/values-optimized-b
 * vLLM **v0.23.0 → v0.26.0** everywhere; routing sidecar `v0.9.0 → v0.10.0`.
 * Identity moved from a file-local `identity:` anchor block to `global.llmd`,
   and the vendored router gained the patches that make the globals reach it.
-* Render topology became a mode (`none`/`service`/`standalone`) with the
-  Service form as the recommended path; the EPP sidecar is off.
+* Render topology became a mode (`service`/`standalone`/`none`), defaulting to
+  `service` — the v0.9.0 recommendation, and free to leave on. The EPP sidecar
+  is off. Six examples turned out to enable that sidecar with no
+  `token-producer` in their plugin chain (the approximate prefix producer does
+  not tokenize); the container ran unused. Removed, and the guard now catches it.
 * Precise-routing example gained the vLLM v0.26 **KV-event replay socket**
   (`:5559`), so an EPP restart rebuilds its index from the engine's buffer
   instead of waiting for live traffic.

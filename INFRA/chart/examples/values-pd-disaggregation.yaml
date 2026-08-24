@@ -200,10 +200,6 @@ llm-d-modelserver:
 llm-d-router:
   llmd:
     router:
-      # Prefix-cache-scorer tokenizes requests → tokenizer sidecar on.
-      tokenizer:
-        enabled: true
-        modelName: *model
       # One InferencePool selects both roles by guide; the EPP splits by role.
       modelServers:
         matchLabels:
